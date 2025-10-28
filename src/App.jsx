@@ -13,6 +13,10 @@ function App() {
   const [drawData, setDrawData] = useState(null);
   const [matcher, setMatcher] = useState(null);
 
+  // NEW: courts and starting court
+  const [courts, setCourts] = useState(8);
+  const [startCourt, setStartCourt] = useState(1);
+
   const handleDataSubmit = (playerData, confirmedPairs = []) => {
     setPlayers(playerData);
     setPreConfirmedPairs(confirmedPairs);
@@ -25,7 +29,7 @@ function App() {
   };
 
   const generateDraw = (playerList = players) => {
-    const newMatcher = new TournamentMatcher(playerList, 8, 11); // courts=8, toScore=11 (adjust later)
+    const newMatcher = new TournamentMatcher(playerList, courts, 11, { startCourt }); // pass settings
     const draw = newMatcher.generateDraw();
     const summary = newMatcher.getDrawSummary();
     setMatcher(newMatcher);
@@ -44,17 +48,13 @@ function App() {
   };
 
   const handleStepNavigation = (step) => setCurrentStep(step);
+  const getStepIcon = (s) => ({ input: Users, pairing: Target, draw: Trophy }[s]);
+  const getStepTitle = (s) => ({ input: 'Player Data', pairing: 'Partner Pairing', draw: 'Tournament Draw' }[s]);
 
-  const getStepIcon = (step) => ({ input: Users, pairing: Target, draw: Trophy }[step]);
-  const getStepTitle = (step) => ({ input: 'Player Data', pairing: 'Partner Pairing', draw: 'Tournament Draw' }[step]);
-
-  // New: one-click demo loader
   const loadDemo = () => {
     setPlayers(demoPlayers);
     setPreConfirmedPairs([]);
-    setCurrentStep('pairing');
-    // Go straight to draw for convenience:
-    const newMatcher = new TournamentMatcher(demoPlayers, 4, 11); // fewer courts for demo
+    const newMatcher = new TournamentMatcher(demoPlayers, courts, 11, { startCourt });
     const summary = newMatcher.getDrawSummary();
     setMatcher(newMatcher);
     setDrawData(summary);
@@ -77,17 +77,11 @@ function App() {
 
             <div className="flex items-center gap-2">
               {currentStep !== 'input' && (
-                <button
-                  onClick={resetToStart}
-                  className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
-                >
+                <button onClick={resetToStart} className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg">
                   Start Over
                 </button>
               )}
-              <button
-                onClick={loadDemo}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
-              >
+              <button onClick={loadDemo} className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700">
                 Load Demo
               </button>
             </div>
@@ -103,22 +97,14 @@ function App() {
               const Icon = getStepIcon(step);
               const isActive = currentStep === step;
               const isCompleted = ['input', 'pairing', 'draw'].indexOf(currentStep) > index;
-              const canNavigate =
-                step === 'input' ||
-                (step === 'pairing' && players.length > 0) ||
-                (step === 'draw' && drawData);
-
+              const canNavigate = step === 'input' || (step === 'pairing' && players.length > 0) || (step === 'draw' && drawData);
               return (
                 <div key={step} className="flex items-center">
                   <button
                     onClick={() => (canNavigate ? handleStepNavigation(step) : null)}
                     disabled={!canNavigate}
                     className={`flex items-center gap-3 transition-colors ${
-                      isActive
-                        ? 'text-primary-600'
-                        : isCompleted
-                        ? 'text-success-600'
-                        : 'text-neutral-400'
+                      isActive ? 'text-primary-600' : isCompleted ? 'text-success-600' : 'text-neutral-400'
                     } ${canNavigate ? 'hover:text-primary-700 cursor-pointer' : 'cursor-not-allowed'}`}
                   >
                     <div
@@ -130,10 +116,7 @@ function App() {
                     </div>
                     <span className="font-medium">{getStepTitle(step)}</span>
                   </button>
-
-                  {index < 2 && (
-                    <div className={`w-16 h-0.5 mx-4 ${isCompleted ? 'bg-success-300' : 'bg-neutral-200'}`} />
-                  )}
+                  {index < 2 && <div className={`w-16 h-0.5 mx-4 ${isCompleted ? 'bg-success-300' : 'bg-neutral-200'}`} />}
                 </div>
               );
             })}
@@ -144,7 +127,38 @@ function App() {
       {/* Main Content */}
       <main className="py-8">
         {currentStep === 'input' && (
-          <DataInput onDataSubmit={handleDataSubmit} initialPlayers={players} initialPreConfirmedPairs={preConfirmedPairs} />
+          <div className="max-w-7xl mx-auto px-6">
+            {/* Controls for courts and start court */}
+            <div className="bg-white rounded-lg border p-4 mb-6">
+              <h3 className="font-semibold mb-3">Courts</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <label className="flex items-center gap-2">
+                  <span className="w-40 text-sm text-neutral-700">Number of courts</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={24}
+                    value={courts}
+                    onChange={(e) => setCourts(parseInt(e.target.value || '0', 10))}
+                    className="border rounded p-2 w-24"
+                  />
+                </label>
+                <label className="flex items-center gap-2">
+                  <span className="w-40 text-sm text-neutral-700">Starting court number</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    value={startCourt}
+                    onChange={(e) => setStartCourt(parseInt(e.target.value || '0', 10))}
+                    className="border rounded p-2 w-24"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <DataInput onDataSubmit={handleDataSubmit} initialPlayers={players} initialPreConfirmedPairs={preConfirmedPairs} />
+          </div>
         )}
 
         {currentStep === 'pairing' && (
@@ -170,11 +184,11 @@ function App() {
             <p className="mb-2">Professional Tournament Management System</p>
             <div className="text-sm">
               AI vibe coded development by{' '}
-              <a href="https://biela.dev/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700 transition-colors">
+              <a href="https://biela.dev/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700">
                 Biela.dev
               </a>
               , powered by{' '}
-              <a href="https://teachmecode.ae/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700 transition-colors">
+              <a href="https://teachmecode.ae/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700">
                 TeachMeCode® Institute
               </a>
             </div>
