@@ -15,7 +15,7 @@ import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
 /**
  * Props:
  * - players: Array<{ id, name, gender, skillBracket, skillRating, _partnerText? }>
- * - preConfirmedPairs: Array<[Player, Player]> or Array<{a: Player, b: Player}>  (optional)
+ * - preConfirmedPairs: Array<[Player, Player]> or Array<{a: Player, b: Player}>
  * - onPairingComplete: (updatedPlayers) => void
  */
 export default function PartnerPairing({ players = [], preConfirmedPairs = [], onPairingComplete }) {
@@ -30,7 +30,13 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
   // Normalize incoming preConfirmedPairs
   const normalizedPreconfirmed = useMemo(() => {
     return preConfirmedPairs
-      .map((p) => (Array.isArray(p) && p.length === 2 ? { a: p[0], b: p[1] } : p?.a && p?.b ? { a: p.a, b: p.b } : null))
+      .map((p) =>
+        Array.isArray(p) && p.length === 2
+          ? { a: p[0], b: p[1] }
+          : p?.a && p?.b
+          ? { a: p.a, b: p.b }
+          : null
+      )
       .filter(Boolean);
   }, [preConfirmedPairs]);
 
@@ -39,14 +45,15 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
     const byName = new Map(pool.map((p) => [normalizeName(p.name), p]));
     const taken = new Set();
 
-    // 1) preconfirmed/locked
+    // 1) preconfirmed
     const confirmed = [];
     for (const pr of normalizedPreconfirmed) {
       const a = pool.find((x) => x.id === (pr.a.id ?? pr.a));
       const b = pool.find((x) => x.id === (pr.b.id ?? pr.b));
       if (a && b && !taken.has(a.id) && !taken.has(b.id)) {
         confirmed.push({ ...decoratePair(a, b, byName), status: 'confirmed' });
-        taken.add(a.id); taken.add(b.id);
+        taken.add(a.id);
+        taken.add(b.id);
       }
     }
 
@@ -66,16 +73,20 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
       if (!q || q === p || taken.has(q.id)) continue;
       const mutual = wantMap.get(q.id) === normalizeName(p.name);
       sug.push({ ...decoratePair(p, q, byName, mutual), status: 'pending' });
-      taken.add(p.id); taken.add(q.id);
+      taken.add(p.id);
+      taken.add(q.id);
     }
 
     // 3) remaining singles
     const remaining = pool.filter((x) => !taken.has(x.id));
 
-    // Optionally generate auto-pairs for singles
+    // Optional auto-suggest for singles
     const auto = allowAutoSuggest ? makeAutoPairs(remaining).map((s) => ({ ...s, status: 'pending' })) : [];
     const autoTaken = new Set();
-    auto.forEach((s) => { autoTaken.add(s.a.id); autoTaken.add(s.b.id); });
+    auto.forEach((s) => {
+      autoTaken.add(s.a.id);
+      autoTaken.add(s.b.id);
+    });
 
     setSuggestions([...confirmed, ...sug, ...auto]);
     setUnpaired(remaining.filter((p) => !autoTaken.has(p.id)));
@@ -88,31 +99,67 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
     setSuggestions((prev) => prev.map((s) => (s.status === 'pending' ? { ...s, status: 'confirmed' } : s)));
   };
   const confirmPair = (idx) => {
-    setSuggestions((prev) => { const n = [...prev]; n[idx] = { ...n[idx], status: 'confirmed' }; return n; });
+    setSuggestions((prev) => {
+      const n = [...prev];
+      n[idx] = { ...n[idx], status: 'confirmed' };
+      return n;
+    });
   };
   const rejectPair = (idx) => {
-    setSuggestions((prev) => { const n = [...prev]; n[idx] = { ...n[idx], status: 'rejected' }; return n; });
+    setSuggestions((prev) => {
+      const n = [...prev];
+      n[idx] = { ...n[idx], status: 'rejected' };
+      return n;
+    });
   };
   const handleShuffleToggle = () => setAllowAutoSuggest((v) => !v);
   const handleClearPending = () => setSuggestions((prev) => prev.filter((s) => s.status === 'confirmed'));
 
+  // ✅ FIX: write multiple “locked pair” flags so the matcher will respect confirmed pairs
   const handleContinue = () => {
+    // Copy so we don't mutate props
     const updated = players.map((p) => ({ ...p }));
-    for (const p of updated) delete p.lockedPartner;
-    for (const s of suggestions) {
-      if (s.status === 'confirmed') {
-        const a = updated.find((x) => x.id === s.a.id);
-        const b = updated.find((x) => x.id === s.b.id);
-        if (a && b) {
-          a.lockedPartner = b.id;
-          b.lockedPartner = a.id;
-        }
-      }
+
+    // 1) Clear any previous pairing flags (cover all common shapes)
+    for (const p of updated) {
+      delete p.lockedPartner;
+      delete p.locked;
+      delete p.fixedPartnerId;
+      delete p.partnerId;
+      delete p.pairKey;
     }
+
+    // 2) Apply confirmed pairs with multiple compatible markers
+    for (const s of suggestions) {
+      if (s.status !== 'confirmed' || !s.a || !s.b) continue;
+
+      const a = updated.find((x) => x.id === s.a.id);
+      const b = updated.find((x) => x.id === s.b.id);
+      if (!a || !b) continue;
+
+      // Primary flags
+      a.lockedPartner = b.id;
+      b.lockedPartner = a.id;
+
+      a.locked = true;
+      b.locked = true;
+
+      a.fixedPartnerId = b.id;
+      b.fixedPartnerId = a.id;
+
+      a.partnerId = b.id;
+      b.partnerId = a.id;
+
+      // Stable shared key
+      const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
+      a.pairKey = key;
+      b.pairKey = key;
+    }
+
     onPairingComplete?.(updated);
   };
 
-  /* ---------- Drag & drop for Pair Builder ---------- */
+  /* ---------- DnD for Pair Builder ---------- */
   const onDragEnd = (result) => {
     const { source, destination, draggableId } = result;
     if (!destination) return;
@@ -122,7 +169,10 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
     if (destination.droppableId === 'pairSlotA') setBuilderA(p);
     else setBuilderB(p);
   };
-  const clearBuilder = () => { setBuilderA(null); setBuilderB(null); };
+  const clearBuilder = () => {
+    setBuilderA(null);
+    setBuilderB(null);
+  };
   const confirmBuilderPair = () => {
     if (!builderA || !builderB || builderA.id === builderB.id) return;
     setUnpaired((prev) => prev.filter((p) => p.id !== builderA.id && p.id !== builderB.id));
@@ -159,7 +209,11 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
         </button>
 
         <label className="flex items-center gap-2 text-sm bg-neutral-100 px-3 py-2 rounded">
-          <input type="checkbox" checked={allowAutoSuggest} onChange={(e) => setAllowAutoSuggest(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={allowAutoSuggest}
+            onChange={(e) => setAllowAutoSuggest(e.target.checked)}
+          />
           Suggest pairs for singles (optional)
         </label>
 
@@ -180,14 +234,11 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
         </button>
       </div>
 
-      {/* Suggestions grid (scored + colored) */}
+      {/* Suggestions grid */}
       {suggestions.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-8">
           {suggestions.map((s, idx) => (
-            <div
-              key={`${s.a?.id}-${s.b?.id}-${idx}`}
-              className={`border rounded-lg p-4 ${tileColors(s.score)}`}
-            >
+            <div key={`${s.a?.id}-${s.b?.id}-${idx}`} className={`border rounded-lg p-4 ${tileColors(s.score)}`}>
               <div className="flex items-center justify-between">
                 <div className="text-neutral-800 font-medium">Suggested Pair</div>
                 <div className="text-xs text-neutral-700">
@@ -238,9 +289,7 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
                 <button
                   onClick={() => rejectPair(idx)}
                   className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
-                    s.status === 'rejected'
-                      ? 'bg-red-600 text-white'
-                      : 'bg-red-100 text-red-700 hover:bg-red-200'
+                    s.status === 'rejected' ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700 hover:bg-red-200'
                   }`}
                 >
                   <XCircle className="w-4 h-4" />
@@ -252,7 +301,7 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
         </div>
       )}
 
-      {/* Unpaired + Pair Builder at bottom */}
+      {/* Unpaired + Pair Builder */}
       <DragDropContext onDragEnd={onDragEnd}>
         <div className="bg-white border rounded-lg p-4">
           <div className="flex items-center gap-2 mb-3">
