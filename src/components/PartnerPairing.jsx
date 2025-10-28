@@ -1,366 +1,461 @@
 // src/components/PartnerPairing.jsx
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  CheckCircle,
+  XCircle,
+  Users,
+  ChevronRight,
+  ShieldCheck,
+  Shuffle as ShuffleIcon,
+  RotateCcw as ClearIcon,
+  Link as LinkIcon,
+} from 'lucide-react';
+import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
 
 /**
- * Expected player fields (best effort; missing fields are handled gracefully):
- *  - id, name, gender, skillRating, skillBracket
- *  - lockedPartner / fixedPartnerId / partnerId  (already-locked pairs)
- *  - pairKey                                     (optional locked pair marker)
- *  - requestedPartnerId or requestedPartnerName  (preferences from intake)
- *
  * Props:
- *  - players: Player[]
- *  - preConfirmedPairs?: Array<{aId,bId}> | Array<[Player,Player]>
- *  - onPairingComplete(updatedPlayers)
+ * - players: Array<{ id, name, gender, skillBracket, skillRating, _partnerText? }>
+ * - preConfirmedPairs: Array<[Player, Player]> or Array<{a: Player, b: Player}>
+ * - onPairingComplete: (updatedPlayers) => void
  */
-export default function PartnerPairing({ players, preConfirmedPairs = [], onPairingComplete }) {
-  const [confirmed, setConfirmed] = useState(new Set()); // "a|b" sorted ids
-  const [removed, setRemoved] = useState(new Set());     // suggestions user rejected
+export default function PartnerPairing({ players = [], preConfirmedPairs = [], onPairingComplete }) {
+  const [suggestions, setSuggestions] = useState([]); // {a,b,score,mutual,oneWay,status}
+  const [unpaired, setUnpaired] = useState([]);
+  const [allowAutoSuggest, setAllowAutoSuggest] = useState(false); // singles stay unpaired by default
 
-  const idMap = useMemo(() => new Map(players.map(p => [String(p.id), p])), [players]);
-  const nameMap = useMemo(() => {
-    const m = new Map();
-    for (const p of players) m.set(safeName(p.name), String(p.id));
-    return m;
-  }, [players]);
+  // Pair Builder (at bottom)
+  const [builderA, setBuilderA] = useState(null);
+  const [builderB, setBuilderB] = useState(null);
 
-  // Already-locked pairs from roster (pairKey OR symmetric partner pointers)
-  const existingLocked = useMemo(() => detectLockedPairs(players), [players]);
-
-  // Pre-confirmed (from previous screen, if any)
-  const preConfirmedSet = useMemo(() => {
-    const s = new Set();
-    for (const pr of preConfirmedPairs) {
-      let aId, bId;
-      if (Array.isArray(pr)) { aId = pr[0]?.id; bId = pr[1]?.id; }
-      else if (typeof pr === 'object') { aId = pr.aId ?? pr.a?.id; bId = pr.bId ?? pr.b?.id; }
-      if (aId && bId) s.add(keyFor(aId, bId));
-    }
-    return s;
+  // Normalize incoming preConfirmedPairs
+  const normalizedPreconfirmed = useMemo(() => {
+    return preConfirmedPairs
+      .map((p) =>
+        Array.isArray(p) && p.length === 2
+          ? { a: p[0], b: p[1] }
+          : p?.a && p?.b
+          ? { a: p.a, b: p.b }
+          : null
+      )
+      .filter(Boolean);
   }, [preConfirmedPairs]);
 
-  // Build suggestions: mutual → one-way → skill-based. Add confidence + colour.
-  const suggestions = useMemo(() => {
-    const taken = new Set(); // ids reserved by suggestions as we build
-    const sugg = [];
+  useEffect(() => {
+    const pool = players.map((p) => ({ ...p }));
+    const byName = new Map(pool.map((p) => [normalizeName(p.name), p]));
+    const taken = new Set();
 
-    // Reserve already locked
-    for (const { aId, bId } of existingLocked) { taken.add(String(aId)); taken.add(String(bId)); }
-
-    const prefId = (p) =>
-      p.requestedPartnerId ??
-      (p.requestedPartnerName ? nameMap.get(safeName(p.requestedPartnerName)) : null) ??
-      null;
-
-    // 1) Mutual
-    const visited = new Set();
-    for (const p of players) {
-      const pid = String(p.id);
-      if (taken.has(pid)) continue;
-      const qid = prefId(p);
-      if (!qid || taken.has(String(qid))) continue;
-      const q = idMap.get(String(qid));
-      if (!q || taken.has(String(q.id))) continue;
-      if (visited.has(pid) || visited.has(String(q.id))) continue;
-      const qPref = prefId(q);
-      if (String(qPref) === pid) {
-        const meta = pairMeta(p, q, 'mutual');
-        sugg.push(meta);
-        taken.add(pid); taken.add(String(q.id));
-        visited.add(pid); visited.add(String(q.id));
+    // 1) preconfirmed
+    const confirmed = [];
+    for (const pr of normalizedPreconfirmed) {
+      const a = pool.find((x) => x.id === (pr.a.id ?? pr.a));
+      const b = pool.find((x) => x.id === (pr.b.id ?? pr.b));
+      if (a && b && !taken.has(a.id) && !taken.has(b.id)) {
+        confirmed.push({ ...decoratePair(a, b, byName), status: 'confirmed' });
+        taken.add(a.id);
+        taken.add(b.id);
       }
     }
 
-    // 2) One-way (only if both still free)
-    for (const p of players) {
-      const pid = String(p.id);
-      if (taken.has(pid)) continue;
-      const qid = prefId(p);
-      if (!qid || taken.has(String(qid))) continue;
-      const q = idMap.get(String(qid));
-      if (!q || taken.has(String(q.id))) continue;
-      const meta = pairMeta(p, q, 'one-way');
-      sugg.push(meta);
-      taken.add(pid); taken.add(String(q.id));
+    // 2) suggestions from partner text
+    const wantMap = new Map();
+    for (const p of pool) {
+      const who = (p._partnerText || '').split(/[;&]| and /i)[0]?.trim();
+      if (who) wantMap.set(p.id, normalizeName(who));
     }
 
-    // 3) Skill-based for remaining singles
-    const remaining = players.filter(
-      (p) => !taken.has(String(p.id)) && !isInAnyLocked(String(p.id), existingLocked)
-    );
-    remaining.sort((a, b) => (num(a.skillRating) - num(b.skillRating)));
-    for (let i = 0; i < remaining.length; i += 2) {
-      const a = remaining[i];
-      const b = remaining[i + 1];
-      if (a && b) sugg.push(pairMeta(a, b, 'skill'));
+    const sug = [];
+    for (const p of pool) {
+      if (taken.has(p.id)) continue;
+      const want = wantMap.get(p.id);
+      if (!want) continue;
+      const q = byName.get(want);
+      if (!q || q === p || taken.has(q.id)) continue;
+      const mutual = wantMap.get(q.id) === normalizeName(p.name);
+      sug.push({ ...decoratePair(p, q, byName, mutual), status: 'pending' });
+      taken.add(p.id);
+      taken.add(q.id);
     }
 
-    // Drop user-removed suggestions
-    return sugg.filter(pr => !removed.has(keyFor(pr.aId, pr.bId)));
-  }, [players, idMap, nameMap, existingLocked, removed]);
+    // 3) remaining singles
+    const remaining = pool.filter((x) => !taken.has(x.id));
 
-  // --- UI handlers ---
-  const toggleConfirm = (aId, bId) => {
-    const k = keyFor(aId, bId);
-    setConfirmed((s) => {
-      const n = new Set(s);
-      n.has(k) ? n.delete(k) : n.add(k);
+    // Optional auto-suggest for singles
+    const auto = allowAutoSuggest ? makeAutoPairs(remaining).map((s) => ({ ...s, status: 'pending' })) : [];
+    const autoTaken = new Set();
+    auto.forEach((s) => {
+      autoTaken.add(s.a.id);
+      autoTaken.add(s.b.id);
+    });
+
+    setSuggestions([...confirmed, ...sug, ...auto]);
+    setUnpaired(remaining.filter((p) => !autoTaken.has(p.id)));
+    setBuilderA(null);
+    setBuilderB(null);
+  }, [players, normalizedPreconfirmed, allowAutoSuggest]);
+
+  /* ---------- actions ---------- */
+  const confirmAll = () => {
+    setSuggestions((prev) => prev.map((s) => (s.status === 'pending' ? { ...s, status: 'confirmed' } : s)));
+  };
+  const confirmPair = (idx) => {
+    setSuggestions((prev) => {
+      const n = [...prev];
+      n[idx] = { ...n[idx], status: 'confirmed' };
       return n;
     });
   };
-  const removeSuggestion = (aId, bId) => {
-    const k = keyFor(aId, bId);
-    setRemoved((r) => new Set(r).add(k));
-    setConfirmed((c) => { const n = new Set(c); n.delete(k); return n; });
-  };
-  const confirmAll = () => {
-    const all = new Set(confirmed);
-    for (const pr of suggestions) all.add(keyFor(pr.aId, pr.bId));
-    // also add any preConfirmed we got handed
-    for (const k of preConfirmedSet) all.add(k);
-    setConfirmed(all);
-  };
-
-  const handleComplete = () => {
-    // Build locks map from existing locked + newly confirmed + preconfirmed
-    const locks = new Map(); // id -> partnerId
-    for (const pr of existingLocked) {
-      locks.set(String(pr.aId), String(pr.bId));
-      locks.set(String(pr.bId), String(pr.aId));
-    }
-    const allConfirmed = new Set(confirmed);
-    for (const k of preConfirmedSet) allConfirmed.add(k);
-    for (const k of allConfirmed) {
-      const [a, b] = k.split('|');
-      locks.set(String(a), String(b));
-      locks.set(String(b), String(a));
-    }
-
-    const updated = players.map(p => {
-      const pid = String(p.id);
-      const partnerId = locks.get(pid) ?? p.lockedPartner ?? p.fixedPartnerId ?? p.partnerId ?? null;
-      return {
-        ...p,
-        lockedPartner: partnerId,
-        fixedPartnerId: partnerId,
-        partnerId: partnerId,
-      };
+  const rejectPair = (idx) => {
+    setSuggestions((prev) => {
+      const n = [...prev];
+      n[idx] = { ...n[idx], status: 'rejected' };
+      return n;
     });
+  };
+  const handleShuffleToggle = () => setAllowAutoSuggest((v) => !v);
+  const handleClearPending = () => setSuggestions((prev) => prev.filter((s) => s.status === 'confirmed'));
 
-    onPairingComplete(updated);
+  // ✅ FIX: write multiple “locked pair” flags so the matcher will respect confirmed pairs
+  const handleContinue = () => {
+    // Copy so we don't mutate props
+    const updated = players.map((p) => ({ ...p }));
+
+    // 1) Clear any previous pairing flags (cover all common shapes)
+    for (const p of updated) {
+      delete p.lockedPartner;
+      delete p.locked;
+      delete p.fixedPartnerId;
+      delete p.partnerId;
+      delete p.pairKey;
+    }
+
+    // 2) Apply confirmed pairs with multiple compatible markers
+    for (const s of suggestions) {
+      if (s.status !== 'confirmed' || !s.a || !s.b) continue;
+
+      const a = updated.find((x) => x.id === s.a.id);
+      const b = updated.find((x) => x.id === s.b.id);
+      if (!a || !b) continue;
+
+      // Primary flags
+      a.lockedPartner = b.id;
+      b.lockedPartner = a.id;
+
+      a.locked = true;
+      b.locked = true;
+
+      a.fixedPartnerId = b.id;
+      b.fixedPartnerId = a.id;
+
+      a.partnerId = b.id;
+      b.partnerId = a.id;
+
+      // Stable shared key
+      const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
+      a.pairKey = key;
+      b.pairKey = key;
+    }
+
+    onPairingComplete?.(updated);
   };
 
-  // --- Render ---
+  /* ---------- DnD for Pair Builder ---------- */
+  const onDragEnd = (result) => {
+    const { source, destination, draggableId } = result;
+    if (!destination) return;
+    if (source.droppableId !== 'unpaired' || !['pairSlotA', 'pairSlotB'].includes(destination.droppableId)) return;
+    const p = unpaired.find((x) => x.id === draggableId);
+    if (!p) return;
+    if (destination.droppableId === 'pairSlotA') setBuilderA(p);
+    else setBuilderB(p);
+  };
+  const clearBuilder = () => {
+    setBuilderA(null);
+    setBuilderB(null);
+  };
+  const confirmBuilderPair = () => {
+    if (!builderA || !builderB || builderA.id === builderB.id) return;
+    setUnpaired((prev) => prev.filter((p) => p.id !== builderA.id && p.id !== builderB.id));
+    setSuggestions((prev) => [{ ...decoratePair(builderA, builderB, null), status: 'confirmed' }, ...prev]);
+    clearBuilder();
+  };
+
+  const pendingCount = suggestions.filter((s) => s.status === 'pending').length;
+  const confirmedCount = suggestions.filter((s) => s.status === 'confirmed').length;
+
   return (
-    <div className="max-w-5xl mx-auto px-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold text-neutral-900">Confirm Partners</h2>
+    <div className="max-w-7xl mx-auto px-6">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-neutral-900">Partner Pairing</h2>
+          <p className="text-neutral-600">Confirm existing pairs. Singles remain unpaired by default.</p>
+        </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={confirmAll}
-            className="px-3 py-2 rounded bg-primary-600 text-white hover:bg-primary-700"
-          >
-            Confirm all suggestions
-          </button>
-          <button
-            onClick={handleComplete}
-            className="px-3 py-2 rounded bg-success-600 text-white hover:bg-success-700"
-          >
-            Continue to Draw
-          </button>
+          <span className="text-sm text-neutral-600">Confirmed: {confirmedCount}</span>
+          <span className="text-sm text-neutral-600">Pending: {pendingCount}</span>
+          <span className="text-sm text-neutral-600">Unpaired: {unpaired.length}</span>
         </div>
       </div>
 
-      {/* Already-locked pairs */}
-      {existingLocked.length > 0 && (
-        <section className="mb-6">
-          <h3 className="text-sm font-medium text-neutral-700 mb-2">Already locked</h3>
-          <div className="grid grid-cols-1 gap-3">
-            {existingLocked.map((pr, idx) => (
-              <PairTile
-                key={`locked-${idx}`}
-                a={playersById(idMap, pr.aId)}
-                b={playersById(idMap, pr.bId)}
-                reason="locked"
-                confidencePct={100}
-                classes="bg-neutral-50 border-neutral-200"
-                disabled
-              />
-            ))}
-          </div>
-        </section>
+      {/* Bulk actions */}
+      <div className="bg-white border rounded-lg p-4 mb-6 flex flex-wrap items-center gap-3">
+        <button
+          onClick={confirmAll}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+          disabled={pendingCount === 0}
+        >
+          <ShieldCheck className="w-4 h-4" />
+          Confirm All Suggested Pairs
+        </button>
+
+        <label className="flex items-center gap-2 text-sm bg-neutral-100 px-3 py-2 rounded">
+          <input
+            type="checkbox"
+            checked={allowAutoSuggest}
+            onChange={(e) => setAllowAutoSuggest(e.target.checked)}
+          />
+          Suggest pairs for singles (optional)
+        </label>
+
+        <button
+          onClick={handleShuffleToggle}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-100 text-neutral-800 rounded-lg hover:bg-neutral-200 transition-colors"
+        >
+          <ShuffleIcon className="w-4 h-4" />
+          {allowAutoSuggest ? 'Rebuild Suggestions' : 'Generate Suggestions'}
+        </button>
+
+        <button
+          onClick={handleClearPending}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-100 text-neutral-800 rounded-lg hover:bg-neutral-200 transition-colors"
+        >
+          <ClearIcon className="w-4 h-4" />
+          Clear Pending Suggestions
+        </button>
+      </div>
+
+      {/* Suggestions grid */}
+      {suggestions.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-8">
+          {suggestions.map((s, idx) => (
+            <div key={`${s.a?.id}-${s.b?.id}-${idx}`} className={`border rounded-lg p-4 ${tileColors(s.score)}`}>
+              <div className="flex items-center justify-between">
+                <div className="text-neutral-800 font-medium">Suggested Pair</div>
+                <div className="text-xs text-neutral-700">
+                  Score: <b>{s.score}</b>
+                </div>
+              </div>
+
+              <div className="mt-2 flex items-center justify-between gap-3">
+                <div className="flex-1">
+                  <div className="font-semibold text-neutral-900">
+                    {s.a?.name} <span className="text-neutral-500 text-sm">({s.a?.skillRating})</span>
+                  </div>
+                  <div className="text-neutral-600 text-sm">{s.a?.skillBracket}</div>
+                </div>
+
+                <ChevronRight className="w-5 h-5 text-neutral-400" />
+
+                <div className="flex-1 text-right">
+                  <div className="font-semibold text-neutral-900">
+                    {s.b?.name} <span className="text-neutral-500 text-sm">({s.b?.skillRating})</span>
+                  </div>
+                  <div className="text-neutral-600 text-sm">{s.b?.skillBracket}</div>
+                </div>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2">
+                {s.mutual && <span className="px-2 py-0.5 text-xs rounded bg-green-600 text-white">Mutual</span>}
+                {s.oneWay && !s.mutual && (
+                  <span className="px-2 py-0.5 text-xs rounded bg-blue-600 text-white">One-way</span>
+                )}
+                {!s.mutual && !s.oneWay && (
+                  <span className="px-2 py-0.5 text-xs rounded bg-neutral-200 text-neutral-700">No selection</span>
+                )}
+              </div>
+
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => confirmPair(idx)}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
+                    s.status === 'confirmed'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-green-100 text-green-700 hover:bg-green-200'
+                  }`}
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  {s.status === 'confirmed' ? 'Confirmed' : 'Confirm'}
+                </button>
+                <button
+                  onClick={() => rejectPair(idx)}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
+                    s.status === 'rejected' ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700 hover:bg-red-200'
+                  }`}
+                >
+                  <XCircle className="w-4 h-4" />
+                  {s.status === 'rejected' ? 'Rejected' : 'Reject'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
-      {/* Suggestions */}
-      <section>
-        <h3 className="text-sm font-medium text-neutral-700 mb-2">Suggestions</h3>
-        {suggestions.length === 0 ? (
-          <div className="text-neutral-500 text-sm">No suggestions available.</div>
-        ) : (
-          <div className="grid grid-cols-1 gap-3">
-            {suggestions.map((pr, idx) => {
-              const a = playersById(idMap, pr.aId);
-              const b = playersById(idMap, pr.bId);
-              const k = keyFor(pr.aId, pr.bId);
-              const isConf = confirmed.has(k) || preConfirmedSet.has(k);
-
-              // Colour + confidence
-              let classes = 'bg-neutral-50 border-neutral-200';
-              if (pr.reason === 'mutual') classes = 'bg-green-50 border-green-200';
-              else if (pr.reason === 'one-way') classes = 'bg-amber-50 border-amber-200';
-              const pctText = `${Math.round(pr.confidencePct)}%`;
-
-              return (
-                <PairTile
-                  key={`sugg-${idx}`}
-                  a={a}
-                  b={b}
-                  reason={pr.reason}
-                  confidencePct={pr.confidencePct}
-                  pctText={pctText}
-                  classes={classes}
-                  checked={isConf}
-                  onToggle={() => toggleConfirm(pr.aId, pr.bId)}
-                  onRemove={() => removeSuggestion(pr.aId, pr.bId)}
-                />
-              );
-            })}
+      {/* Unpaired + Pair Builder */}
+      <DragDropContext onDragEnd={onDragEnd}>
+        <div className="bg-white border rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Users className="w-4 h-4" />
+            <div className="font-semibold">Unpaired Players ({unpaired.length})</div>
           </div>
-        )}
-      </section>
-    </div>
-  );
-}
 
-/* ---------------- helpers & UI bits ---------------- */
+          <Droppable droppableId="unpaired" direction="vertical">
+            {(provided) => (
+              <div ref={provided.innerRef} {...provided.droppableProps} className="flex flex-wrap gap-2 mb-6">
+                {unpaired.map((p, idx) => (
+                  <Draggable key={p.id} draggableId={p.id} index={idx}>
+                    {(provided2) => (
+                      <span
+                        ref={provided2.innerRef}
+                        {...provided2.draggableProps}
+                        {...provided2.dragHandleProps}
+                        className="px-3 py-1 bg-neutral-100 text-neutral-700 rounded-full text-sm cursor-move"
+                        title="Drag into Pair Builder below"
+                      >
+                        {p.name} ({p.skillRating})
+                      </span>
+                    )}
+                  </Draggable>
+                ))}
+                {provided.placeholder}
+              </div>
+            )}
+          </Droppable>
 
-function PairTile({
-  a, b, reason, confidencePct, pctText,
-  classes, disabled = false, checked = false, onToggle, onRemove
-}) {
-  if (!a || !b) return null;
+          {/* Pair Builder */}
+          <div className="border-t pt-4">
+            <div className="flex items-center gap-2 mb-3">
+              <LinkIcon className="w-4 h-4" />
+              <h3 className="font-semibold">Pair Builder</h3>
+            </div>
 
-  const reasonText =
-    reason === 'mutual' ? 'Mutual' :
-    reason === 'one-way' ? 'One-way' :
-    reason === 'locked' ? 'Locked' : 'Skill';
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+              {/* Slot A */}
+              <Droppable droppableId="pairSlotA" direction="vertical">
+                {(provided, snapshot) => (
+                  <div
+                    ref={provided.innerRef}
+                    {...provided.droppableProps}
+                    className={`h-20 border-2 rounded-lg flex items-center justify-center p-3 ${
+                      snapshot.isDraggingOver ? 'border-primary-500' : 'border-neutral-200'
+                    }`}
+                  >
+                    {builderA ? (
+                      <div className="text-center">
+                        <div className="font-semibold">{builderA.name}</div>
+                        <div className="text-xs text-neutral-600">{builderA.skillBracket || '—'}</div>
+                      </div>
+                    ) : (
+                      <div className="text-neutral-500 text-sm">Drop Player A here</div>
+                    )}
+                    {provided.placeholder}
+                  </div>
+                )}
+              </Droppable>
 
-  const confText =
-    reason === 'mutual' ? 'high confidence' :
-    reason === 'one-way' ? 'medium confidence' :
-    (confidencePct >= 60 ? 'medium confidence' : 'low confidence');
+              {/* Center controls */}
+              <div className="flex flex-col items-center gap-2">
+                <button
+                  onClick={confirmBuilderPair}
+                  disabled={!builderA || !builderB}
+                  className="px-4 py-2 bg-success-600 text-white rounded-lg disabled:opacity-50"
+                >
+                  Confirm Pair
+                </button>
+                <button onClick={clearBuilder} className="px-4 py-2 bg-neutral-100 rounded-lg">
+                  Clear
+                </button>
+              </div>
 
-  return (
-    <div className={`border rounded-lg px-5 py-4 ${classes}`}>
-      <div className="flex items-center justify-between">
-        <div className="text-neutral-900 font-medium">
-          {a.name} &amp; {b.name}
-          <span className="ml-3 text-xs text-neutral-500">{reasonText}</span>
-          <span className="ml-2 text-xs text-neutral-500">{confText}{pctText ? ` • ${pctText}` : ''}</span>
+              {/* Slot B */}
+              <Droppable droppableId="pairSlotB" direction="vertical">
+                {(provided, snapshot) => (
+                  <div
+                    ref={provided.innerRef}
+                    {...provided.droppableProps}
+                    className={`h-20 border-2 rounded-lg flex items-center justify-center p-3 ${
+                      snapshot.isDraggingOver ? 'border-primary-500' : 'border-neutral-200'
+                    }`}
+                  >
+                    {builderB ? (
+                      <div className="text-center">
+                        <div className="font-semibold">{builderB.name}</div>
+                        <div className="text-xs text-neutral-600">{builderB.skillBracket || '—'}</div>
+                      </div>
+                    ) : (
+                      <div className="text-neutral-500 text-sm">Drop Player B here</div>
+                    )}
+                    {provided.placeholder}
+                  </div>
+                )}
+              </Droppable>
+            </div>
+          </div>
         </div>
-        {!disabled && (
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-neutral-700 flex items-center gap-2">
-              <input type="checkbox" checked={checked} onChange={onToggle} />
-              Confirm
-            </label>
-            <button
-              onClick={onRemove}
-              className="text-neutral-500 hover:text-red-600 text-sm"
-              title="Remove this suggestion"
-            >
-              ✕
-            </button>
-          </div>
-        )}
-      </div>
-      <div className="mt-2 text-sm text-neutral-600">
-        Skill: {rangeText(a.skillBracket)}{a.skillBracket && b.skillBracket ? ' | ' : ''}
-        {b.skillBracket ? `Skill: ${rangeText(b.skillBracket)}` : ''}
-        {(a.gender || b.gender) && (
-          <span className="ml-2">
-            | Genders: {a.gender || '-'} &amp; {b.gender || '-'}
-          </span>
-        )}
+      </DragDropContext>
+
+      {/* Continue */}
+      <div className="mt-8 flex justify-end">
+        <button
+          onClick={handleContinue}
+          className="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+        >
+          Continue to Draw
+        </button>
       </div>
     </div>
   );
 }
 
-function playersById(idMap, id) {
-  return idMap.get(String(id));
-}
-function keyFor(aId, bId) {
-  const A = String(aId), B = String(bId);
-  return A < B ? `${A}|${B}` : `${B}|${A}`;
-}
-function safeName(s) { return String(s || '').trim().toLowerCase(); }
-function num(n) { const v = Number(n); return Number.isFinite(v) ? v : 0; }
-function rangeText(r) { return String(r ?? '-'); }
+/* ---------- helpers ---------- */
+const normalizeName = (n) => (n || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
-function isInAnyLocked(id, lockedList) {
-  for (const pr of lockedList) {
-    if (String(pr.aId) === String(id) || String(pr.bId) === String(id)) return true;
-  }
-  return false;
-}
+const decoratePair = (a, b, byName, forcedMutual) => {
+  const mutual =
+    forcedMutual ??
+    (normalizeName(a._partnerText || '') === normalizeName(b.name) &&
+      normalizeName(b._partnerText || '') === normalizeName(a.name));
 
-/** detect locked pairs in roster */
-function detectLockedPairs(players) {
+  const aPickedB = normalizeName(a._partnerText || '') === normalizeName(b.name);
+  const bPickedA = normalizeName(b._partnerText || '') === normalizeName(a.name);
+  const oneWay = (aPickedB || bPickedA) && !mutual;
+
+  const diff = Math.abs((a.skillRating ?? 3) - (b.skillRating ?? 3));
+  const skillScore = Math.max(0, 30 - diff * 15); // 0diff=30, 1.0=15, 2.0+=0
+  const wantScore = mutual ? 60 : oneWay ? 30 : 0;
+  const score = Math.min(100, Math.round(wantScore + skillScore));
+
+  return { a, b, score, mutual, oneWay };
+};
+
+const tileColors = (score) => {
+  if (score >= 80) return 'border-green-300 bg-green-50';
+  if (score >= 60) return 'border-blue-300 bg-blue-50';
+  if (score >= 40) return 'border-yellow-300 bg-yellow-50';
+  return 'border-red-300 bg-red-50';
+};
+
+const makeAutoPairs = (pool) => {
+  const sorted = [...pool].sort((p1, p2) => {
+    const g = (p1.gender || '').localeCompare(p2.gender || '');
+    if (g !== 0) return g;
+    return (p1.skillRating ?? 0) - (p2.skillRating ?? 0);
+  });
   const out = [];
-  const seen = new Set();
-  const idMap = new Map(players.map(p => [String(p.id), p]));
-
-  // pairKey route
-  const byPairKey = new Map();
-  for (const p of players) {
-    const key = p.pairKey && String(p.pairKey).trim();
-    if (!key) continue;
-    if (!byPairKey.has(key)) byPairKey.set(key, []);
-    byPairKey.get(key).push(p);
-  }
-  for (const arr of byPairKey.values()) {
-    if (arr.length === 2) {
-      const [a,b] = arr;
-      out.push({ aId: String(a.id), bId: String(b.id), reason: 'pairKey' });
-      seen.add(String(a.id)); seen.add(String(b.id));
-    }
-  }
-
-  // symmetric partner pointers
-  const partnerOf = (p) => p.lockedPartner ?? p.fixedPartnerId ?? p.partnerId ?? null;
-  for (const p of players) {
-    const pid = String(p.id);
-    if (seen.has(pid)) continue;
-    const qid = partnerOf(p);
-    if (!qid || seen.has(String(qid))) continue;
-    const q = idMap.get(String(qid));
-    if (!q) continue;
-    const back = partnerOf(q);
-    if (back && String(back) !== pid) continue;
-    out.push({ aId: pid, bId: String(q.id), reason: 'partnerId' });
-    seen.add(pid); seen.add(String(q.id));
+  for (let i = 0; i < sorted.length; i += 2) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (a && b) out.push(decoratePair(a, b));
   }
   return out;
-}
-
-/** build pair metadata with confidence */
-function pairMeta(a, b, reason) {
-  const [sa, sb] = [num(a.skillRating), num(b.skillRating)];
-  const gap = Math.abs(sa - sb);
-
-  let pct = 60; // base
-  if (reason === 'mutual') pct = 95;
-  else if (reason === 'one-way') pct = 80;
-  else {
-    // skill-based: scale down with gap (0 → 70, 0.5 → 60, 1.0 → 50, 1.5 → 45, 2.0+ → 40)
-    pct = Math.max(40, Math.min(70, 70 - (gap * 20)));
-  }
-
-  return {
-    aId: String(a.id),
-    bId: String(b.id),
-    reason,
-    confidencePct: pct,
-  };
-}
+};
