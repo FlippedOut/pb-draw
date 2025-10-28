@@ -1,570 +1,267 @@
-import React, { useState } from 'react';
-import { Upload, Users, Plus, Trash2, CheckCircle } from 'lucide-react';
+// src/components/DataInput.jsx
+import React, { useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import { ShieldCheck, Users, Upload, CheckCircle, XCircle } from 'lucide-react';
 
-const HEADER_ALIASES = {
-  firstName: ["attendee first name","first name","given name","fname"],
-  lastName:  ["attendee last name","last name","surname","lname"],
-  partner:   ["name of partner/partners - full name","partner","preferred partner","partner name"],
-  skill:     ["i am registered to play in a tournament at this level:","i am registered to play in a tournament at this level","skill","skill bracket","dupr"],
-  gender:    ["gender","sex","male/female","m/f","player gender"]
-};
+/**
+ * Props:
+ * - onDataSubmit(players, confirmedPairs)
+ * - initialPlayers?
+ * - initialPreConfirmedPairs?
+ *
+ * Input format supported:
+ *  - CSV/TSV pasted with headers, including (if available):
+ *    "Attendee First Name", "Attendee Last Name", "Name of partner/partners - full name", "I am registered to play in a tournament at this level:"
+ *  - Otherwise it will try to split on commas and create names.
+ */
 
-const norm = (s) => (s || "").toString().trim().toLowerCase();
-
-const detectDelimiter = (text) => {
-  const firstLine = (text.split(/\r?\n/)[0] || "");
-  return firstLine.includes("\t") ? "\t" : ",";
-};
-
-const indexByHeader = (headers) => {
-  const map = { firstName: -1, lastName: -1, partner: -1, skill: -1, gender: -1 };
-  const h = headers.map(norm);
-  for (const key of Object.keys(HEADER_ALIASES)) {
-    for (let i = 0; i < h.length; i++) {
-      if (HEADER_ALIASES[key].includes(h[i])) { map[key] = i; break; }
-    }
-  }
-  return map;
-};
-
-const parseExportOrSimpleList = (text, skillBrackets, convertBracketToRating) => {
-  const trimmed = text.trim();
-  if (!trimmed) return [];
-
-  const lines = trimmed.split(/\r?\n/).filter(l => norm(l).length > 0);
-
-  // Fallback: "Name - Skill" OR "Name, Skill"
-  const looksSimple = lines.every(l => / - |,/.test(l)) && !trimmed.toLowerCase().includes("attendee first name");
-  if (looksSimple) {
-    const simple = [];
-    lines.forEach((l, idx) => {
-      const parts = l.includes(" - ") ? l.split(" - ") : l.split(",");
-      const name = (parts[0] || "").trim();
-      const bracket = (parts[1] || "").trim();
-      if (name && skillBrackets.includes(bracket)) {
-        simple.push({
-          id: crypto.randomUUID(),
-          name,
-          skillBracket: bracket,
-          skillRating: convertBracketToRating(bracket),
-          gender: "",
-          lockedPartner: null,
-          preferredPartner: null,
-        });
-      }
-    });
-    return simple;
-  }
-
-  // CSV/TSV with headers
-  const delim = detectDelimiter(trimmed);
-  const header = lines[0].split(delim).map(s => s.replace(/^\ufeff/, "")); // strip BOM
-  const idx = indexByHeader(header);
-
-  const out = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(delim);
-    if (cols.length === 1) continue;
-
-    const first = idx.firstName >= 0 ? (cols[idx.firstName] || "").trim() : "";
-    const last  = idx.lastName  >= 0 ? (cols[idx.lastName]  || "").trim() : "";
-    const partnerRaw   = idx.partner >= 0 ? (cols[idx.partner] || "").trim() : "";
-    const skillBracket = idx.skill   >= 0 ? (cols[idx.skill]   || "").trim() : "";
-    const genderRaw    = idx.gender  >= 0 ? (cols[idx.gender]  || "").trim() : "";
-
-    const name = [first, last].filter(Boolean).join(" ").trim();
-    if (!name) continue;
-    if (skillBracket && !skillBrackets.includes(skillBracket)) continue; // strict accept only known brackets
-
-    // Normalize gender values
-    const normalizedGender = normalizeGender(genderRaw);
-
-    const finalBracket = skillBracket || "3.0-3.49";
-    out.push({
-      id: crypto.randomUUID(),
-      name,
-      skillBracket: finalBracket,
-      skillRating: convertBracketToRating(finalBracket),
-      gender: normalizedGender,
-      lockedPartner: null,
-      preferredPartner: partnerRaw || null,
-    });
-  }
-  return out;
-};
-
-const normalizeGender = (genderRaw) => {
-  if (!genderRaw) return "";
-  const normalized = genderRaw.toLowerCase().trim();
-  if (["male", "m", "man"].includes(normalized)) return "male";
-  if (["female", "f", "woman"].includes(normalized)) return "female";
-  return "";
-};
-
-function DataInput({ onDataSubmit, initialPlayers = [], initialPreConfirmedPairs = [] }) {
-  // Internal state management
-  const [processingStep, setProcessingStep] = useState(initialPlayers.length > 0 ? 'pairs' : 'input');
-  const [inputMethod, setInputMethod] = useState('paste');
-  const [pasteData, setPasteData] = useState('');
+export default function DataInput({
+  onDataSubmit,
+  initialPlayers = [],
+  initialPreConfirmedPairs = [],
+}) {
+  const [rawText, setRawText] = useState('');
   const [players, setPlayers] = useState(initialPlayers);
-  const [detectedPairs, setDetectedPairs] = useState(initialPreConfirmedPairs);
-  const skillBrackets = [
-    '2.0-2.49', '2.5-2.99', '3.0-3.49', '3.5-3.99', 
-    '4.0-4.49', '4.5-4.99', '5.0-5.49', '5.5+'
-  ];
+  const [pairs, setPairs] = useState([]); // {a, b, status:'pending'|'confirmed'|'rejected'}
+  const [unpaired, setUnpaired] = useState([]);
+  const [isPending, startTransition] = useTransition();
+  const parseTimer = useRef(null);
 
-  const convertBracketToRating = (bracket) => {
-    const bracketMap = {
-      '2.0-2.49': 2.25,
-      '2.5-2.99': 2.75,
-      '3.0-3.49': 3.25,
-      '3.5-3.99': 3.75,
-      '4.0-4.49': 4.25,
-      '4.5-4.99': 4.75,
-      '5.0-5.49': 5.25,
-      '5.5+': 5.75
-    };
-    return bracketMap[bracket] || 3.0;
-  };
+  // --- Debounced parse of textarea to reduce INP (interaction timing) ---
+  useEffect(() => {
+    if (parseTimer.current) clearTimeout(parseTimer.current);
+    parseTimer.current = setTimeout(() => {
+      startTransition(() => {
+        const { players: p, suggestions, unpaired: u } = parseInput(rawText);
+        // Apply any initially confirmed pairs
+        const normalizedInitial = normalizePreconfirmed(initialPreConfirmedPairs, p);
+        const confirmed = normalizedInitial.map((s) => ({ ...s, status: 'confirmed' }));
+        setPlayers(p);
+        setPairs([...confirmed, ...suggestions]); // suggestions start as pending
+        setUnpaired(u);
+      });
+    }, 250); // debounce
+    return () => clearTimeout(parseTimer.current);
+  }, [rawText, initialPreConfirmedPairs]);
 
-  const handlePasteSubmit = () => {
-    if (!pasteData.trim()) return;
-    const parsed = parseExportOrSimpleList(pasteData, skillBrackets, convertBracketToRating);
-    if (parsed.length === 0) return;
-    setPlayers(parsed);
-    setPasteData("");
-    processPartnerMatchingWithPlayers(parsed);
-  };
-
-  const updatePlayerGender = (playerId, gender) => {
-    setPlayers(prev => prev.map(player => 
-      player.id === playerId ? { ...player, gender } : player
-    ));
-  };
-
-  const addManualPlayer = () => {
-    const newPlayer = {
-      id: crypto.randomUUID(),
-      name: '',
-      skillBracket: '3.0-3.49',
-      skillRating: 3.25,
-      gender: '',
-      lockedPartner: null,
-      preferredPartner: null
-    };
-    setPlayers(prev => [...prev, newPlayer]);
-  };
-
-  const updateManualPlayer = (playerId, field, value) => {
-    setPlayers(prev => prev.map(player => {
-      if (player.id === playerId) {
-        const updated = { ...player, [field]: value };
-        if (field === 'skillBracket') {
-          updated.skillRating = convertBracketToRating(value);
-        }
-        return updated;
-      }
-      return player;
-    }));
-  };
-
-  const removePlayer = (playerId) => {
-    setPlayers(prev => prev.filter(player => player.id !== playerId));
-  };
-
-  const processPartnerMatching = () => {
-    const pairs = [];
-    const paired = new Set();
-
-    players.forEach(p1 => {
-      if (paired.has(p1.id) || !p1.preferredPartner) return;
-      
-      const p2 = players.find(p => 
-        !paired.has(p.id) && 
-        p.id !== p1.id &&
-        matchesName(p.name, p1.preferredPartner)
-      );
-
-      if (p2) {
-        const isMutual = p2.preferredPartner && matchesName(p1.name, p2.preferredPartner);
-        pairs.push({
-          id: crypto.randomUUID(),
-          player1: p1,
-          player2: p2,
-          mutual: isMutual,
-          confidence: isMutual ? 'high' : 'medium',
-          confirmed: false
-        });
-        paired.add(p1.id);
-        paired.add(p2.id);
-      }
-    });
-
-    setDetectedPairs(pairs);
-    // Check if all players have gender assigned
-    const playersWithoutGender = players.filter(p => !p.gender);
-    if (playersWithoutGender.length > 0) {
-      setProcessingStep('gender');
-    } else {
-      setProcessingStep('pairs');
+  // ---- Helpers ----
+  const normalizePreconfirmed = (pre, pool) => {
+    const byName = new Map(pool.map((x) => [normalizeName(x.name), x]));
+    const out = [];
+    for (const item of pre || []) {
+      let a = item?.a ?? (Array.isArray(item) ? item[0] : null);
+      let b = item?.b ?? (Array.isArray(item) ? item[1] : null);
+      if (!a || !b) continue;
+      // allow either {id} or {name}
+      if (!a.id && a.name) a = byName.get(normalizeName(a.name));
+      if (!b.id && b.name) b = byName.get(normalizeName(b.name));
+      if (a?.id && b?.id) out.push({ a, b });
     }
+    return out;
   };
 
-  const processPartnerMatchingWithPlayers = (playerList) => {
-    const pairs = [];
-    const paired = new Set();
+  const normalizeName = (n) => (n || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
-    playerList.forEach(p1 => {
-      if (paired.has(p1.id) || !p1.preferredPartner) return;
-      
-      const p2 = playerList.find(p => 
-        !paired.has(p.id) && 
-        p.id !== p1.id &&
-        matchesName(p.name, p1.preferredPartner)
-      );
-
-      if (p2) {
-        const isMutual = p2.preferredPartner && matchesName(p1.name, p2.preferredPartner);
-        pairs.push({
-          id: crypto.randomUUID(),
-          player1: p1,
-          player2: p2,
-          mutual: isMutual,
-          confidence: isMutual ? 'high' : 'medium',
-          confirmed: false
-        });
-        paired.add(p1.id);
-        paired.add(p2.id);
-      }
-    });
-
-    setDetectedPairs(pairs);
-    // Check if all players have gender assigned
-    const playersWithoutGender = playerList.filter(p => !p.gender);
-    if (playersWithoutGender.length > 0) {
-      setProcessingStep('gender');
-    } else {
-      setProcessingStep('pairs');
+  function parseInput(text) {
+    if (!text?.trim()) {
+      return { players: initialPlayers, suggestions: [], unpaired: initialPlayers };
     }
-  };
-  const matchesName = (fullName, searchName) => {
-    if (!searchName) return false;
-    const full = fullName.toLowerCase().trim();
-    const search = searchName.toLowerCase().trim();
-    const firstName = full.split(' ')[0];
-    const lastName = full.split(' ').slice(-1)[0];
-    return full.includes(search) || search.includes(firstName) || search.includes(lastName);
-  };
 
-  const confirmPair = (pairId) => {
-    setDetectedPairs(prev => prev.map(pair => 
-      pair.id === pairId ? { ...pair, confirmed: true } : pair
-    ));
-  };
+    const lines = text.trim().split(/\r?\n/);
+    const header = lines[0].split(/\t|,/).map((h) => h.trim().toLowerCase());
+    const find = (label) => header.findIndex((h) => h.includes(label));
 
-  const rejectPair = (pairId) => {
-    setDetectedPairs(prev => prev.filter(pair => pair.id !== pairId));
-  };
+    const firstIdx = find('attendee first name');
+    const lastIdx = find('attendee last name');
+    const partnerIdx = find('partner');
+    const skillIdx = find('i am registered');
 
-  const proceedToTournament = () => {
-    const updatedPlayers = players.map(player => {
-      const pair = detectedPairs.find(p => 
-        p.confirmed && (p.player1.id === player.id || p.player2.id === player.id)
-      );
-      
-      if (pair) {
-        const partnerId = pair.player1.id === player.id ? pair.player2.id : pair.player1.id;
-        return { ...player, lockedPartner: partnerId };
+    const pool = [];
+    const byName = new Map();
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(/\t|,/);
+      let name = cols[0]?.trim();
+      let partnerField = '';
+      let skillBracket = '';
+
+      if (firstIdx >= 0 && lastIdx >= 0) {
+        name = `${(cols[firstIdx] || '').trim()} ${(cols[lastIdx] || '').trim()}`.trim();
       }
-      return player;
-    });
-    
-    const confirmedPairs = detectedPairs.filter(p => p.confirmed);
-    onDataSubmit(updatedPlayers, confirmedPairs);
+      if (partnerIdx >= 0) partnerField = (cols[partnerIdx] || '').trim();
+      if (skillIdx >= 0) skillBracket = (cols[skillIdx] || '').trim();
+
+      if (!name) continue;
+      const p = {
+        id: `p_${i}_${Math.random().toString(36).slice(2)}`,
+        name,
+        gender: '', // optional
+        skillBracket,
+        skillRating: guessSkill(skillBracket),
+        _partnerText: partnerField,
+      };
+      pool.push(p);
+      byName.set(normalizeName(name), p);
+    }
+
+    // Suggested pairs from the “Name of partner…” column
+    const suggested = [];
+    const taken = new Set();
+    for (const p of pool) {
+      const partnerName = (p._partnerText || '').split(/[;&]| and /i)[0]?.trim(); // first name if multiple
+      if (!partnerName) continue;
+      const q = byName.get(normalizeName(partnerName));
+      if (!q || q === p) continue;
+      if (taken.has(p.id) || taken.has(q.id)) continue;
+      taken.add(p.id);
+      taken.add(q.id);
+      suggested.push({ a: p, b: q, status: 'pending' });
+    }
+
+    const unpairedList = pool.filter((x) => !taken.has(x.id));
+
+    return { players: pool, suggestions: suggested, unpaired: unpairedList };
+  }
+
+  function guessSkill(bracket) {
+    const m = /(\d+(?:\.\d+)?)/.exec(bracket || '');
+    if (!m) return 3.0;
+    const v = parseFloat(m[1]);
+    if (isNaN(v)) return 3.0;
+    return v;
+  }
+
+  // ---- Actions ----
+  const confirmAll = () => {
+    setPairs((prev) => prev.map((s) => (s.status === 'pending' ? { ...s, status: 'confirmed' } : s)));
   };
+
+  const confirmOne = (idx) => {
+    setPairs((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], status: 'confirmed' };
+      return next;
+    });
+  };
+
+  const rejectOne = (idx) => {
+    setPairs((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], status: 'rejected' };
+      return next;
+    });
+  };
+
+  const handleContinue = () => {
+    // Build confirmed list for App -> PartnerPairing
+    const confirmedPairs = pairs.filter((p) => p.status === 'confirmed').map(({ a, b }) => ({ a, b }));
+    onDataSubmit(players, confirmedPairs);
+  };
+
+  const pendingCount = pairs.filter((p) => p.status === 'pending').length;
+  const confirmedCount = pairs.filter((p) => p.status === 'confirmed').length;
 
   return (
-    <div className="max-w-4xl mx-auto p-6 bg-white rounded-lg shadow-lg">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-neutral-900 mb-4">Player Registration Data</h2>
-        
-        {processingStep === 'input' && (
-          <div className="space-y-4">
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={() => setInputMethod('paste')}
-                className={`px-4 py-2 rounded-lg transition-colors ${inputMethod === 'paste' ? 'bg-primary-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-              >
-                Paste Data
-              </button>
-              <button
-                onClick={() => setInputMethod('manual')}
-                className={`px-4 py-2 rounded-lg transition-colors ${inputMethod === 'manual' ? 'bg-primary-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-              >
-                Manual Entry
-              </button>
-            </div>
+    <div className="max-w-4xl mx-auto">
+      {/* Paste box */}
+      <div className="bg-white border rounded-lg p-4 mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <Upload className="w-4 h-4" />
+          <h3 className="font-semibold">Paste registration data</h3>
+        </div>
+        <textarea
+          className="w-full h-40 p-3 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+          placeholder="Paste CSV/TSV with headers here…"
+          value={rawText}
+          onChange={(e) => setRawText(e.target.value)}
+        />
+        <div className="text-xs text-neutral-500 mt-2">
+          Tip: include “Attendee First Name”, “Attendee Last Name”, and “Name of partner/partners - full name”.
+        </div>
+      </div>
 
-            {inputMethod === 'paste' && (
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-2">
-                  Paste Registration Data (CSV/TSV export or Name - Skill Bracket)
-                </label>
-                <p className="text-sm text-neutral-600 mb-2">
-                  Supports: Full CSV/TSV export with headers or simple "Name - Skill Bracket" format
-                </p>
-                <textarea
-                  value={pasteData}
-                  onChange={(e) => setPasteData(e.target.value)}
-                  placeholder="Full export (paste directly from spreadsheet) or:&#10;John Smith - 3.5-3.99&#10;Jane Doe - 4.0-4.49&#10;Mike Johnson - 3.0-3.49"
-                  className="w-full h-40 p-3 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                />
+      {/* Bulk actions + summary */}
+      <div className="bg-white border rounded-lg p-4 mb-6 flex flex-wrap items-center gap-3">
+        <button
+          onClick={confirmAll}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+          disabled={pendingCount === 0}
+          title={pendingCount === 0 ? 'No pending suggestions to confirm' : 'Confirm all suggested pairs'}
+        >
+          <ShieldCheck className="w-4 h-4" />
+          Confirm All Suggested Pairs
+        </button>
+
+        <div className="text-sm text-neutral-600">
+          Players: <b>{players.length}</b> • Confirmed pairs: <b>{confirmedCount}</b> • Pending suggestions:{' '}
+          <b>{pendingCount}</b> • Unpaired: <b>{unpaired.length}</b>
+        </div>
+      </div>
+
+      {/* Suggested pairs list */}
+      {pairs.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+          {pairs.map((s, i) => (
+            <div
+              key={`${s.a?.id}-${s.b?.id}-${i}`}
+              className={`border rounded-lg p-3 ${
+                s.status === 'confirmed'
+                  ? 'border-green-300 bg-green-50'
+                  : s.status === 'rejected'
+                  ? 'border-red-300 bg-red-50'
+                  : 'border-neutral-200 bg-white'
+              }`}
+            >
+              <div className="font-medium text-neutral-900 mb-2">Suggested Pair</div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="font-semibold">{s.a?.name}</div>
+                  <div className="text-xs text-neutral-600">{s.a?.skillBracket}</div>
+                </div>
+                <div className="text-neutral-400">×</div>
+                <div className="text-right">
+                  <div className="font-semibold">{s.b?.name}</div>
+                  <div className="text-xs text-neutral-600">{s.b?.skillBracket}</div>
+                </div>
+              </div>
+              <div className="mt-3 flex gap-2">
                 <button
-                  onClick={handlePasteSubmit}
-                  className="mt-4 bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700 transition-colors"
+                  onClick={() => confirmOne(i)}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
+                    s.status === 'confirmed'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-green-100 text-green-700 hover:bg-green-200'
+                  }`}
                 >
-                  Process Data
-                </button>
-              </div>
-            )}
-
-            {inputMethod === 'manual' && (
-              <div>
-                <div className="space-y-3">
-                  {players.map((player) => (
-                    <div key={player.id} className="grid grid-cols-12 gap-3 items-center p-3 bg-neutral-50 rounded-lg">
-                      <div className="col-span-4">
-                        <input
-                          type="text"
-                          value={player.name}
-                          onChange={(e) => updateManualPlayer(player.id, 'name', e.target.value)}
-                          placeholder="Player Name"
-                          className="w-full p-2 border border-neutral-300 rounded focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                        />
-                      </div>
-                      <div className="col-span-3">
-                        <select
-                          value={player.skillBracket}
-                          onChange={(e) => updateManualPlayer(player.id, 'skillBracket', e.target.value)}
-                          className="w-full p-2 border border-neutral-300 rounded focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                        >
-                          {skillBrackets.map(bracket => (
-                            <option key={bracket} value={bracket}>{bracket}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="col-span-2">
-                        <select
-                          value={player.gender}
-                          onChange={(e) => updateManualPlayer(player.id, 'gender', e.target.value)}
-                          className="w-full p-2 border border-neutral-300 rounded focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                        >
-                          <option value="">Gender</option>
-                          <option value="male">Male</option>
-                          <option value="female">Female</option>
-                        </select>
-                      </div>
-                      <div className="col-span-2">
-                        <span className="text-sm text-neutral-600">
-                          DUPR: {player.skillRating}
-                        </span>
-                      </div>
-                      <div className="col-span-1">
-                        <button
-                          onClick={() => removePlayer(player.id)}
-                          className="p-2 text-red-600 hover:bg-red-50 rounded transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="flex gap-4 mt-4">
-                  <button
-                    onClick={addManualPlayer}
-                    className="flex items-center gap-2 px-4 py-2 bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200 transition-colors"
-                  >
-                    <Plus className="w-4 h-4" />
-                    Add Player
-                  </button>
-                  
-                  {players.length > 0 && (
-                    <button
-                      onClick={processPartnerMatching}
-                      className="px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
-                    >
-                      Process Partner Matching
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Gender Assignment Step */}
-        {processingStep === 'gender' && (
-          <div className="space-y-6">
-            <div className="bg-primary-50 border border-primary-200 rounded-lg p-4">
-              <h3 className="font-medium text-primary-800 mb-2">Complete Missing Gender Information</h3>
-              <p className="text-sm text-primary-700">
-                Some players are missing gender information. Please assign genders to complete the setup.
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              {players.filter(player => !player.gender).map((player) => (
-                <div key={player.id} className="grid grid-cols-12 gap-3 items-center p-3 bg-neutral-50 rounded-lg">
-                  <div className="col-span-5">
-                    <span className="font-medium text-neutral-900">{player.name}</span>
-                    <span className="text-sm text-neutral-600 ml-2">({player.skillBracket})</span>
-                  </div>
-                  <div className="col-span-4">
-                    <select
-                      value={player.gender}
-                      onChange={(e) => updatePlayerGender(player.id, e.target.value)}
-                      className="w-full p-2 border border-neutral-300 rounded focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                    >
-                      <option value="">Select Gender</option>
-                      <option value="male">Male</option>
-                      <option value="female">Female</option>
-                    </select>
-                  </div>
-                  <div className="col-span-3 flex items-center justify-end">
-                    <button
-                      onClick={() => removePlayer(player.id)}
-                      className="p-2 text-red-600 hover:bg-red-50 rounded transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex justify-between items-center">
-              <div className="text-sm text-neutral-600">
-                Missing Gender: {players.filter(p => !p.gender).length} players
-              </div>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setProcessingStep('input')}
-                  className="px-4 py-2 bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200 transition-colors"
-                >
-                  Back to Input
+                  <CheckCircle className="w-4 h-4" />
+                  {s.status === 'confirmed' ? 'Confirmed' : 'Confirm'}
                 </button>
                 <button
-                  onClick={() => setProcessingStep('pairs')}
-                  disabled={players.filter(p => !p.gender).length > 0}
-                  className="px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:bg-neutral-300 disabled:cursor-not-allowed transition-colors"
+                  onClick={() => rejectOne(i)}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
+                    s.status === 'rejected'
+                      ? 'bg-red-600 text-white'
+                      : 'bg-red-100 text-red-700 hover:bg-red-200'
+                  }`}
                 >
-                  Review Partner Pairs
+                  <XCircle className="w-4 h-4" />
+                  {s.status === 'rejected' ? 'Rejected' : 'Reject'}
                 </button>
               </div>
             </div>
-          </div>
-        )}
+          ))}
+        </div>
+      )}
 
-        {/* Pair Review Step */}
-        {processingStep === 'pairs' && (
-          <div className="space-y-6">
-            <div className="bg-success-50 border border-success-200 rounded-lg p-4">
-              <h3 className="font-medium text-success-800 mb-2">Review Detected Partner Pairs</h3>
-              <p className="text-sm text-success-700">
-                Confirm or reject the automatically detected partner preferences.
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              {detectedPairs.map((pair) => (
-                <div key={pair.id} className={`p-4 border-2 rounded-lg ${
-                  pair.confidence === 'high' ? 'border-success-200 bg-success-50' : 'border-warning-200 bg-warning-50'
-                }`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="font-medium text-neutral-900">
-                          {pair.player1.name} & {pair.player2.name}
-                        </span>
-                        {pair.mutual ? (
-                          <span className="px-2 py-1 bg-success-100 text-success-700 text-xs rounded-full">
-                            Mutual
-                          </span>
-                        ) : (
-                          <span className="px-2 py-1 bg-warning-100 text-warning-700 text-xs rounded-full">
-                            One-way
-                          </span>
-                        )}
-                        <span className={`px-2 py-1 text-xs rounded-full ${
-                          pair.confidence === 'high' ? 'bg-success-100 text-success-700' : 'bg-warning-100 text-warning-700'
-                        }`}>
-                          {pair.confidence} confidence
-                        </span>
-                      </div>
-                      <div className="text-sm text-neutral-600">
-                        Skill: {pair.player1.skillBracket} | 
-                        Genders: {pair.player1.gender} & {pair.player2.gender}
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      {!pair.confirmed && (
-                        <>
-                          <button
-                            onClick={() => confirmPair(pair.id)}
-                            className="px-3 py-1 bg-success-600 text-white rounded hover:bg-success-700 transition-colors"
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            onClick={() => rejectPair(pair.id)}
-                            className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
-                          >
-                            Reject
-                          </button>
-                        </>
-                      )}
-                      {pair.confirmed && (
-                        <CheckCircle className="w-6 h-6 text-success-600" />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-
-              {detectedPairs.length === 0 && (
-                <div className="text-center py-8 text-neutral-500">
-                  No partner preferences detected in the registration data.
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-between items-center">
-              <div className="text-sm text-neutral-600">
-                Confirmed Pairs: {detectedPairs.filter(p => p.confirmed).length} | 
-                Singles: {players.length - (detectedPairs.filter(p => p.confirmed).length * 2)}
-              </div>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setProcessingStep('gender')}
-                  className="px-4 py-2 bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200 transition-colors"
-                >
-                  Back to Gender Assignment
-                </button>
-                <button
-                  onClick={proceedToTournament}
-                  className="px-6 py-2 bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors"
-                >
-                  Continue to Manual Pairing
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+      {/* Continue */}
+      <div className="flex justify-end">
+        <button
+          onClick={handleContinue}
+          className="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+          disabled={players.length === 0}
+        >
+          Continue
+        </button>
       </div>
     </div>
   );
 }
-
-export default DataInput;
