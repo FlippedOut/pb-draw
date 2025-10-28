@@ -1,7 +1,9 @@
+// src/App.jsx
 import React, { useState } from 'react';
 import DataInput from './components/DataInput';
 import PartnerPairing from './components/PartnerPairing';
 import DrawDisplay from './components/DrawDisplay';
+import DebugPanel from './components/DebugPanel';
 import { TournamentMatcher } from './utils/matchingAlgorithm';
 import { Trophy, Users, Target } from 'lucide-react';
 import demoPlayers from './data/demoPlayers';
@@ -13,7 +15,7 @@ function App() {
   const [drawData, setDrawData] = useState(null);
   const [matcher, setMatcher] = useState(null);
 
-  // NEW: courts and starting court
+  // Courts & starting court (already added earlier)
   const [courts, setCourts] = useState(8);
   const [startCourt, setStartCourt] = useState(1);
 
@@ -29,11 +31,12 @@ function App() {
   };
 
   const generateDraw = (playerList = players) => {
-    const newMatcher = new TournamentMatcher(playerList, courts, 11, { startCourt }); // pass settings
-    const draw = newMatcher.generateDraw();
-    const summary = newMatcher.getDrawSummary();
+    const newMatcher = new TournamentMatcher(playerList, courts, 11, { startCourt });
+    // These two calls depend on your matchingAlgorithm implementation
+    newMatcher.generateDraw?.();
+    const summary = newMatcher.getDrawSummary?.();
     setMatcher(newMatcher);
-    setDrawData(summary);
+    setDrawData(summary || null);
     setCurrentStep('draw');
   };
 
@@ -48,6 +51,7 @@ function App() {
   };
 
   const handleStepNavigation = (step) => setCurrentStep(step);
+
   const getStepIcon = (s) => ({ input: Users, pairing: Target, draw: Trophy }[s]);
   const getStepTitle = (s) => ({ input: 'Player Data', pairing: 'Partner Pairing', draw: 'Tournament Draw' }[s]);
 
@@ -55,11 +59,14 @@ function App() {
     setPlayers(demoPlayers);
     setPreConfirmedPairs([]);
     const newMatcher = new TournamentMatcher(demoPlayers, courts, 11, { startCourt });
-    const summary = newMatcher.getDrawSummary();
+    newMatcher.generateDraw?.();
+    const summary = newMatcher.getDrawSummary?.();
     setMatcher(newMatcher);
-    setDrawData(summary);
+    setDrawData(summary || null);
     setCurrentStep('draw');
   };
+
+  const showDebug = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
 
   return (
     <div className="min-h-screen bg-neutral-50">
@@ -77,11 +84,17 @@ function App() {
 
             <div className="flex items-center gap-2">
               {currentStep !== 'input' && (
-                <button onClick={resetToStart} className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg">
+                <button
+                  onClick={resetToStart}
+                  className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+                >
                   Start Over
                 </button>
               )}
-              <button onClick={loadDemo} className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700">
+              <button
+                onClick={loadDemo}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+              >
                 Load Demo
               </button>
             </div>
@@ -97,7 +110,8 @@ function App() {
               const Icon = getStepIcon(step);
               const isActive = currentStep === step;
               const isCompleted = ['input', 'pairing', 'draw'].indexOf(currentStep) > index;
-              const canNavigate = step === 'input' || (step === 'pairing' && players.length > 0) || (step === 'draw' && drawData);
+              const canNavigate =
+                step === 'input' || (step === 'pairing' && players.length > 0) || (step === 'draw' && drawData);
               return (
                 <div key={step} className="flex items-center">
                   <button
@@ -157,12 +171,20 @@ function App() {
               </div>
             </div>
 
-            <DataInput onDataSubmit={handleDataSubmit} initialPlayers={players} initialPreConfirmedPairs={preConfirmedPairs} />
+            <DataInput
+              onDataSubmit={handleDataSubmit}
+              initialPlayers={players}
+              initialPreConfirmedPairs={preConfirmedPairs}
+            />
           </div>
         )}
 
         {currentStep === 'pairing' && (
-          <PartnerPairing players={players} preConfirmedPairs={preConfirmedPairs} onPairingComplete={handlePairingComplete} />
+          <PartnerPairing
+            players={players}
+            preConfirmedPairs={preConfirmedPairs}
+            onPairingComplete={handlePairingComplete}
+          />
         )}
 
         {currentStep === 'draw' && drawData && (
@@ -195,6 +217,18 @@ function App() {
           </div>
         </div>
       </footer>
+
+      {/* Debug overlay */}
+      {showDebug && (
+        <DebugPanel
+          currentStep={currentStep}
+          players={players}
+          drawData={drawData}
+          matcher={matcher}
+          regenerateAll={handleDrawUpdate}
+          regenerateRound={(n) => matcher?.regenerateRound?.(n)}
+        />
+      )}
     </div>
   );
 }
