@@ -1,0 +1,6 @@
+{
+  "app": "pb-draw",
+  "status": "ok",
+  "env": "vercel",
+  "note": "Static health check to validate routing and build output"
+}
