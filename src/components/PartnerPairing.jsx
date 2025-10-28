@@ -1,258 +1,265 @@
-import React, { useState, useEffect } from 'react';
-import { Link, Users, Unlink, ArrowRight } from 'lucide-react';
+// src/components/PartnerPairing.jsx
+import React, { useEffect, useMemo, useState } from 'react';
+import { CheckCircle, XCircle, Users, ChevronRight, ShieldCheck } from 'lucide-react';
 
-function PartnerPairing({ players, preConfirmedPairs = [], onPairingComplete }) {
-  const [lockedPairs, setLockedPairs] = useState([]);
-  const [availablePlayers, setAvailablePlayers] = useState([]);
-  const [selectedPlayer1, setSelectedPlayer1] = useState('');
-  const [selectedPlayer2, setSelectedPlayer2] = useState('');
+/**
+ * Props:
+ * - players: Array<{ id, name, gender, skillBracket, skillRating, lockedPartner? }>
+ * - preConfirmedPairs: Array<[Player, Player]> or Array<{a: Player, b: Player}> (either shape supported)
+ * - onPairingComplete: (updatedPlayers) => void
+ */
+export default function PartnerPairing({ players = [], preConfirmedPairs = [], onPairingComplete }) {
+  // Internal model for a suggestion card
+  // { a: Player, b: Player, status: 'pending' | 'confirmed' | 'rejected' }
+  const [suggestions, setSuggestions] = useState([]);
+  const [unpaired, setUnpaired] = useState([]);
 
-  useEffect(() => {
-    // Initialize with pre-confirmed pairs from data input
-    if (preConfirmedPairs.length > 0) {
-      const convertedPairs = preConfirmedPairs.map(pair => ({
-        id: `pre-confirmed-${pair.id}`,
-        player1: pair.player1,
-        player2: pair.player2,
-        preConfirmed: true
-      }));
-      setLockedPairs(convertedPairs);
-    }
+  // ---- Normalize any incoming preConfirmedPairs shape
+  const normalizedPreconfirmed = useMemo(() => {
+    return preConfirmedPairs
+      .map((p) => {
+        if (Array.isArray(p) && p.length === 2) return { a: p[0], b: p[1] };
+        if (p && p.a && p.b) return { a: p.a, b: p.b };
+        return null;
+      })
+      .filter(Boolean);
   }, [preConfirmedPairs]);
 
+  // ---- Build the initial suggestion list once, based on current players + preconfirmed
   useEffect(() => {
-    updateAvailablePlayers();
-  }, [players, lockedPairs]);
+    // Clone players to avoid mutating props
+    const pool = players.map((p) => ({ ...p }));
+    const taken = new Set();
 
-  const updateAvailablePlayers = () => {
-    const pairedPlayerIds = new Set();
-    lockedPairs.forEach(pair => {
-      pairedPlayerIds.add(pair.player1.id);
-      pairedPlayerIds.add(pair.player2.id);
-    });
-    
-    const available = players.filter(player => !pairedPlayerIds.has(player.id));
-    setAvailablePlayers(available);
-  };
+    // Helper to mark a pair as taken
+    const markTaken = (id1, id2) => {
+      taken.add(id1);
+      taken.add(id2);
+    };
 
-  const createLockedPair = () => {
-    if (!selectedPlayer1 || !selectedPlayer2 || selectedPlayer1 === selectedPlayer2) {
-      return;
-    }
-
-    const player1 = players.find(p => p.id === selectedPlayer1);
-    const player2 = players.find(p => p.id === selectedPlayer2);
-
-    if (player1 && player2) {
-      const newPair = {
-        id: `pair-${lockedPairs.length + 1}`,
-        player1,
-        player2,
-        preConfirmed: false
-      };
-
-      setLockedPairs(prev => [...prev, newPair]);
-      setSelectedPlayer1('');
-      setSelectedPlayer2('');
-    }
-  };
-
-  const removePair = (pairId) => {
-    // Only allow removal of manually created pairs, not pre-confirmed ones
-    setLockedPairs(prev => prev.filter(pair => pair.id !== pairId || pair.preConfirmed));
-  };
-
-  const handleComplete = () => {
-    // Update players with locked partner information
-    const updatedPlayers = players.map(player => {
-      const pair = lockedPairs.find(p => 
-        p.player1.id === player.id || p.player2.id === player.id
-      );
-      
-      if (pair) {
-        const partnerId = pair.player1.id === player.id ? pair.player2.id : pair.player1.id;
-        return { ...player, lockedPartner: partnerId };
+    // 1) Respect existing locked partners (already confirmed)
+    const existingLockedPairs = [];
+    const seenLocked = new Set();
+    for (const p of pool) {
+      if (p.lockedPartner && !seenLocked.has(p.id)) {
+        const mate = pool.find((x) => x.id === p.lockedPartner);
+        if (mate) {
+          existingLockedPairs.push({ a: p, b: mate, status: 'confirmed' });
+          seenLocked.add(p.id);
+          seenLocked.add(mate.id);
+          markTaken(p.id, mate.id);
+        }
       }
-      
-      return { ...player, lockedPartner: null };
+    }
+
+    // 2) Pre-confirmed incoming pairs (treat like confirmed)
+    const preConfirmed = [];
+    for (const pair of normalizedPreconfirmed) {
+      const a = pool.find((x) => x.id === (pair.a.id ?? pair.a));
+      const b = pool.find((x) => x.id === (pair.b.id ?? pair.b));
+      if (a && b && !taken.has(a.id) && !taken.has(b.id)) {
+        preConfirmed.push({ a, b, status: 'confirmed' });
+        markTaken(a.id, b.id);
+      }
+    }
+
+    // 3) Auto-suggest pairs for the remaining players
+    // Strategy: sort by skillRating (and gender to keep mixed options near each other), then pair neighbors.
+    const remaining = pool.filter((p) => !taken.has(p.id));
+    remaining.sort((p1, p2) => {
+      // keep genders grouped but not strictly segregated: M < F for stable order
+      const g = (p1.gender || '').localeCompare(p2.gender || '');
+      if (g !== 0) return g;
+      return (p1.skillRating ?? 0) - (p2.skillRating ?? 0);
     });
 
-    onPairingComplete(updatedPlayers);
-  };
-
-  const getPlayerDisplayName = (player) => {
-    return `${player.name} (${player.skillBracket}, ${player.gender})`;
-  };
-
-  const getPairSkillDifference = (player1, player2) => {
-    return Math.abs(player1.skillRating - player2.skillRating);
-  };
-
-  const getPairGenderMatch = (player1, player2) => {
-    if (player1.gender === player2.gender) {
-      return player1.gender === 'female' ? 'Female Pair' : 'Male Pair';
+    const auto = [];
+    for (let i = 0; i < remaining.length; i += 2) {
+      const a = remaining[i];
+      const b = remaining[i + 1];
+      if (a && b) {
+        auto.push({ a, b, status: 'pending' });
+        markTaken(a.id, b.id);
+      }
     }
-    return 'Mixed Pair';
+
+    // 4) Anyone leftover is unpaired (odd count)
+    const leftover = pool.filter((p) => !taken.has(p.id));
+
+    setSuggestions([...existingLockedPairs, ...preConfirmed, ...auto]);
+    setUnpaired(leftover);
+  }, [players, normalizedPreconfirmed]);
+
+  // ---- Actions on a single card
+  const confirmPair = (idx) => {
+    setSuggestions((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], status: 'confirmed' };
+      return next;
+    });
   };
+
+  const rejectPair = (idx) => {
+    setSuggestions((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], status: 'rejected' };
+      return next;
+    });
+  };
+
+  // ---- Confirm ALL pending suggestions at once
+  const confirmAll = () => {
+    setSuggestions((prev) => prev.map((s) => (s.status === 'pending' ? { ...s, status: 'confirmed' } : s)));
+  };
+
+  // ---- Build updated players and finish
+  const handleContinue = () => {
+    // Copy incoming players so we can set lockedPartner safely
+    const updated = players.map((p) => ({ ...p }));
+
+    // Clear any existing lockedPartner first (fresh pass)
+    for (const p of updated) delete p.lockedPartner;
+
+    // Apply confirmed suggestions both ways
+    for (const s of suggestions) {
+      if (s.status === 'confirmed' && s.a && s.b) {
+        const a = updated.find((x) => x.id === s.a.id);
+        const b = updated.find((x) => x.id === s.b.id);
+        if (a && b) {
+          a.lockedPartner = b.id;
+          b.lockedPartner = a.id;
+        }
+      }
+    }
+
+    onPairingComplete?.(updated);
+  };
+
+  const pendingCount = suggestions.filter((s) => s.status === 'pending').length;
+  const confirmedCount = suggestions.filter((s) => s.status === 'confirmed').length;
 
   return (
-    <div className="max-w-6xl mx-auto p-6 bg-white rounded-lg shadow-lg">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-neutral-900 mb-2">Partner Pairing</h2>
-        <p className="text-neutral-600">
-          Create locked pairs for players who must play together throughout the tournament.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Create New Pair */}
-        <div className="space-y-4">
-          <h3 className="text-lg font-semibold text-neutral-800 flex items-center gap-2">
-            <Link className="w-5 h-5" />
-            Create Locked Pair
-          </h3>
-          
-          <div className="space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-neutral-700 mb-1">
-                Player 1
-              </label>
-              <select
-                value={selectedPlayer1}
-                onChange={(e) => setSelectedPlayer1(e.target.value)}
-                className="w-full p-3 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-              >
-                <option value="">Select Player 1</option>
-                {availablePlayers.map(player => (
-                  <option key={player.id} value={player.id}>
-                    {getPlayerDisplayName(player)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-neutral-700 mb-1">
-                Player 2
-              </label>
-              <select
-                value={selectedPlayer2}
-                onChange={(e) => setSelectedPlayer2(e.target.value)}
-                className="w-full p-3 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-              >
-                <option value="">Select Player 2</option>
-                {availablePlayers
-                  .filter(player => player.id !== selectedPlayer1)
-                  .map(player => (
-                    <option key={player.id} value={player.id}>
-                      {getPlayerDisplayName(player)}
-                    </option>
-                  ))}
-              </select>
-            </div>
-
-            {selectedPlayer1 && selectedPlayer2 && (
-              <div className="p-3 bg-neutral-50 rounded-lg">
-                <div className="text-sm text-neutral-600">
-                  <div>Skill Difference: {getPairSkillDifference(
-                    players.find(p => p.id === selectedPlayer1),
-                    players.find(p => p.id === selectedPlayer2)
-                  ).toFixed(2)} points</div>
-                  <div>Match Type: {getPairGenderMatch(
-                    players.find(p => p.id === selectedPlayer1),
-                    players.find(p => p.id === selectedPlayer2)
-                  )}</div>
-                </div>
-              </div>
-            )}
-
-            <button
-              onClick={createLockedPair}
-              disabled={!selectedPlayer1 || !selectedPlayer2 || selectedPlayer1 === selectedPlayer2}
-              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg hover:bg-primary-700 disabled:bg-neutral-300 disabled:cursor-not-allowed transition-colors"
-            >
-              Create Pair
-            </button>
-          </div>
+    <div className="max-w-7xl mx-auto px-6">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-neutral-900">Partner Pairing</h2>
+          <p className="text-neutral-600">
+            Confirm suggested pairs or reject to adjust later. You can also confirm everything in one click.
+          </p>
         </div>
-
-        {/* Existing Pairs */}
-        <div className="space-y-4">
-          <h3 className="text-lg font-semibold text-neutral-800 flex items-center gap-2">
-            <Users className="w-5 h-5" />
-            Locked Pairs ({lockedPairs.length})
-            {preConfirmedPairs.length > 0 && (
-              <span className="text-sm text-success-600">
-                ({preConfirmedPairs.length} auto-detected)
-              </span>
-            )}
-          </h3>
-
-          <div className="space-y-3 max-h-96 overflow-y-auto">
-            {lockedPairs.length === 0 ? (
-              <div className="text-center py-8 text-neutral-500">
-                No locked pairs created yet
-              </div>
-            ) : (
-              lockedPairs.map(pair => (
-                <div key={pair.id} className={`p-4 border rounded-lg ${
-                  pair.preConfirmed 
-                    ? 'border-success-200 bg-success-50' 
-                    : 'border-neutral-200 bg-neutral-50'
-                }`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      {pair.preConfirmed && (
-                        <div className="flex items-center gap-1 mb-1">
-                          <span className="px-2 py-1 bg-success-100 text-success-700 text-xs rounded-full">
-                            Auto-detected
-                          </span>
-                        </div>
-                      )}
-                      <div className="font-medium text-neutral-900">
-                        {pair.player1.name} & {pair.player2.name}
-                      </div>
-                      <div className="text-sm text-neutral-600 mt-1">
-                        Skills: {pair.player1.skillBracket} & {pair.player2.skillBracket} | 
-                        Type: {getPairGenderMatch(pair.player1, pair.player2)}
-                      </div>
-                    </div>
-                    {!pair.preConfirmed && (
-                      <button
-                        onClick={() => removePair(pair.id)}
-                        className="p-2 text-red-600 hover:bg-red-50 rounded transition-colors"
-                      >
-                        <Unlink className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-neutral-600">Confirmed: {confirmedCount}</span>
+          <span className="text-sm text-neutral-600">Pending: {pendingCount}</span>
+          <span className="text-sm text-neutral-600">Unpaired: {unpaired.length}</span>
         </div>
       </div>
 
-      {/* Summary and Continue */}
-      <div className="mt-8 pt-6 border-t border-neutral-200">
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-neutral-600">
-            <div>Total Players: {players.length}</div>
-            <div>Locked Pairs: {lockedPairs.length} ({lockedPairs.length * 2} players)</div>
-            <div>Singles: {availablePlayers.length} players</div>
-          </div>
-          
-          <button
-            onClick={handleComplete}
-            className="flex items-center gap-2 bg-success-600 text-white px-6 py-3 rounded-lg hover:bg-success-700 transition-colors"
+      {/* Bulk actions */}
+      <div className="bg-white border rounded-lg p-4 mb-6 flex flex-wrap items-center gap-3">
+        <button
+          onClick={confirmAll}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+          disabled={pendingCount === 0}
+          title={pendingCount === 0 ? 'No pending suggestions to confirm' : 'Confirm all suggested pairs'}
+        >
+          <ShieldCheck className="w-4 h-4" />
+          Confirm All Suggested Pairs
+        </button>
+
+        <div className="text-sm text-neutral-600">
+          Tip: You can still confirm/reject individual pairs below after using “Confirm All”.
+        </div>
+      </div>
+
+      {/* Suggestion list */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {suggestions.map((s, idx) => (
+          <div
+            key={`${s.a?.id}-${s.b?.id}-${idx}`}
+            className={`border rounded-lg p-4 bg-white ${
+              s.status === 'confirmed'
+                ? 'border-green-300 bg-green-50'
+                : s.status === 'rejected'
+                ? 'border-red-300 bg-red-50'
+                : 'border-neutral-200'
+            }`}
           >
-            Continue to Draw Generation
-            <ArrowRight className="w-4 h-4" />
-          </button>
+            <div className="flex items-center gap-2 text-neutral-700 font-medium mb-3">
+              <Users className="w-4 h-4" />
+              Suggested Pair
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex-1">
+                <div className="font-semibold text-neutral-900">
+                  {s.a?.name} <span className="text-neutral-500 text-sm">({s.a?.skillRating})</span>
+                </div>
+                <div className="text-neutral-600 text-sm">{s.a?.gender} • {s.a?.skillBracket}</div>
+              </div>
+
+              <ChevronRight className="w-5 h-5 text-neutral-400" />
+
+              <div className="flex-1 text-right">
+                <div className="font-semibold text-neutral-900">
+                  {s.b?.name} <span className="text-neutral-500 text-sm">({s.b?.skillRating})</span>
+                </div>
+                <div className="text-neutral-600 text-sm">{s.b?.gender} • {s.b?.skillBracket}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={() => confirmPair(idx)}
+                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
+                  s.status === 'confirmed'
+                    ? 'bg-green-600 text-white'
+                    : 'bg-green-100 text-green-700 hover:bg-green-200'
+                }`}
+                title="Confirm this pair"
+              >
+                <CheckCircle className="w-4 h-4" />
+                {s.status === 'confirmed' ? 'Confirmed' : 'Confirm'}
+              </button>
+              <button
+                onClick={() => rejectPair(idx)}
+                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded ${
+                  s.status === 'rejected'
+                    ? 'bg-red-600 text-white'
+                    : 'bg-red-100 text-red-700 hover:bg-red-200'
+                }`}
+                title="Reject this pair"
+              >
+                <XCircle className="w-4 h-4" />
+                {s.status === 'rejected' ? 'Rejected' : 'Reject'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Unpaired list */}
+      {unpaired.length > 0 && (
+        <div className="mt-8 bg-white border rounded-lg p-4">
+          <div className="font-semibold text-neutral-900 mb-3">Unpaired Players ({unpaired.length})</div>
+          <div className="flex flex-wrap gap-2">
+            {unpaired.map((p) => (
+              <span key={p.id} className="px-3 py-1 bg-neutral-100 text-neutral-700 rounded-full text-sm">
+                {p.name} ({p.skillRating})
+              </span>
+            ))}
+          </div>
         </div>
+      )}
+
+      {/* Continue */}
+      <div className="mt-8 flex justify-end">
+        <button
+          onClick={handleContinue}
+          className="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+        >
+          Continue to Draw
+        </button>
       </div>
     </div>
   );
 }
-
-export default PartnerPairing;
