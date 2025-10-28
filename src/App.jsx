@@ -3,10 +3,9 @@ import React, { useState } from 'react';
 import DataInput from './components/DataInput';
 import PartnerPairing from './components/PartnerPairing';
 import DrawDisplay from './components/DrawDisplay';
-import DebugPanel from './components/DebugPanel';
+import TournamentSettings from './components/TournamentSettings';
 import { TournamentMatcher } from './utils/matchingAlgorithm';
 import { Trophy, Users, Target } from 'lucide-react';
-import demoPlayers from './data/demoPlayers';
 
 function App() {
   const [currentStep, setCurrentStep] = useState('input'); // 'input', 'pairing', 'draw'
@@ -15,9 +14,12 @@ function App() {
   const [drawData, setDrawData] = useState(null);
   const [matcher, setMatcher] = useState(null);
 
-  // Courts & starting court (already added earlier)
-  const [courts, setCourts] = useState(8);
-  const [startCourt, setStartCourt] = useState(1);
+  // ✅ New: app-level tournament settings
+  const [settings, setSettings] = useState({
+    courts: 11,      // default
+    startCourt: 1,   // default
+    rounds: 8        // default
+  });
 
   const handleDataSubmit = (playerData, confirmedPairs = []) => {
     setPlayers(playerData);
@@ -31,16 +33,29 @@ function App() {
   };
 
   const generateDraw = (playerList = players) => {
-    const newMatcher = new TournamentMatcher(playerList, courts, 11, { startCourt });
-    // These two calls depend on your matchingAlgorithm implementation
-    newMatcher.generateDraw?.();
-    const summary = newMatcher.getDrawSummary?.();
+    // Pass settings through to the matcher (courts/startCourt/rounds)
+    const newMatcher = new TournamentMatcher(
+      playerList,
+      settings.courts,   // keep this aligned with options for clarity
+      11,                // toScore (not used in layout yet)
+      {
+        courts: settings.courts,
+        startCourt: settings.startCourt,
+        rounds: settings.rounds
+      }
+    );
+
+    const draw = newMatcher.generateDraw();
+    const summary = newMatcher.getDrawSummary();
+
     setMatcher(newMatcher);
-    setDrawData(summary || null);
+    setDrawData(summary);
     setCurrentStep('draw');
   };
 
-  const handleDrawUpdate = () => generateDraw();
+  const handleDrawUpdate = () => {
+    generateDraw();
+  };
 
   const resetToStart = () => {
     setCurrentStep('input');
@@ -48,25 +63,22 @@ function App() {
     setPreConfirmedPairs([]);
     setDrawData(null);
     setMatcher(null);
+    // keep settings as-is so user choices persist
   };
 
-  const handleStepNavigation = (step) => setCurrentStep(step);
-
-  const getStepIcon = (s) => ({ input: Users, pairing: Target, draw: Trophy }[s]);
-  const getStepTitle = (s) => ({ input: 'Player Data', pairing: 'Partner Pairing', draw: 'Tournament Draw' }[s]);
-
-  const loadDemo = () => {
-    setPlayers(demoPlayers);
-    setPreConfirmedPairs([]);
-    const newMatcher = new TournamentMatcher(demoPlayers, courts, 11, { startCourt });
-    newMatcher.generateDraw?.();
-    const summary = newMatcher.getDrawSummary?.();
-    setMatcher(newMatcher);
-    setDrawData(summary || null);
-    setCurrentStep('draw');
+  const handleStepNavigation = (step) => {
+    setCurrentStep(step);
   };
 
-  const showDebug = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
+  const getStepIcon = (step) => {
+    const icons = { input: Users, pairing: Target, draw: Trophy };
+    return icons[step];
+  };
+
+  const getStepTitle = (step) => {
+    const titles = { input: 'Player Data', pairing: 'Partner Pairing', draw: 'Tournament Draw' };
+    return titles[step];
+  };
 
   return (
     <div className="min-h-screen bg-neutral-50">
@@ -81,23 +93,14 @@ function App() {
                 <p className="text-sm text-neutral-600">Professional tournament management system</p>
               </div>
             </div>
-
-            <div className="flex items-center gap-2">
-              {currentStep !== 'input' && (
-                <button
-                  onClick={resetToStart}
-                  className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
-                >
-                  Start Over
-                </button>
-              )}
+            {currentStep !== 'input' && (
               <button
-                onClick={loadDemo}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+                onClick={resetToStart}
+                className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
               >
-                Load Demo
+                Start Over
               </button>
-            </div>
+            )}
           </div>
         </div>
       </header>
@@ -111,14 +114,21 @@ function App() {
               const isActive = currentStep === step;
               const isCompleted = ['input', 'pairing', 'draw'].indexOf(currentStep) > index;
               const canNavigate =
-                step === 'input' || (step === 'pairing' && players.length > 0) || (step === 'draw' && drawData);
+                step === 'input' ||
+                (step === 'pairing' && players.length > 0) ||
+                (step === 'draw' && drawData);
+
               return (
                 <div key={step} className="flex items-center">
                   <button
                     onClick={() => (canNavigate ? handleStepNavigation(step) : null)}
                     disabled={!canNavigate}
                     className={`flex items-center gap-3 transition-colors ${
-                      isActive ? 'text-primary-600' : isCompleted ? 'text-success-600' : 'text-neutral-400'
+                      isActive
+                        ? 'text-primary-600'
+                        : isCompleted
+                        ? 'text-success-600'
+                        : 'text-neutral-400'
                     } ${canNavigate ? 'hover:text-primary-700 cursor-pointer' : 'cursor-not-allowed'}`}
                   >
                     <div
@@ -130,7 +140,10 @@ function App() {
                     </div>
                     <span className="font-medium">{getStepTitle(step)}</span>
                   </button>
-                  {index < 2 && <div className={`w-16 h-0.5 mx-4 ${isCompleted ? 'bg-success-300' : 'bg-neutral-200'}`} />}
+
+                  {index < 2 && (
+                    <div className={`w-16 h-0.5 mx-4 ${isCompleted ? 'bg-success-300' : 'bg-neutral-200'}`} />
+                  )}
                 </div>
               );
             })}
@@ -142,34 +155,8 @@ function App() {
       <main className="py-8">
         {currentStep === 'input' && (
           <div className="max-w-7xl mx-auto px-6">
-            {/* Controls for courts and start court */}
-            <div className="bg-white rounded-lg border p-4 mb-6">
-              <h3 className="font-semibold mb-3">Courts</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <label className="flex items-center gap-2">
-                  <span className="w-40 text-sm text-neutral-700">Number of courts</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={24}
-                    value={courts}
-                    onChange={(e) => setCourts(parseInt(e.target.value || '0', 10))}
-                    className="border rounded p-2 w-24"
-                  />
-                </label>
-                <label className="flex items-center gap-2">
-                  <span className="w-40 text-sm text-neutral-700">Starting court number</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={99}
-                    value={startCourt}
-                    onChange={(e) => setStartCourt(parseInt(e.target.value || '0', 10))}
-                    className="border rounded p-2 w-24"
-                  />
-                </label>
-              </div>
-            </div>
+            {/* ✅ New: settings panel on the first screen */}
+            <TournamentSettings settings={settings} setSettings={setSettings} />
 
             <DataInput
               onDataSubmit={handleDataSubmit}
@@ -206,29 +193,27 @@ function App() {
             <p className="mb-2">Professional Tournament Management System</p>
             <div className="text-sm">
               AI vibe coded development by{' '}
-              <a href="https://biela.dev/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700">
+              <a
+                href="https://biela.dev/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary-600 hover:text-primary-700 transition-colors"
+              >
                 Biela.dev
               </a>
               , powered by{' '}
-              <a href="https://teachmecode.ae/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700">
+              <a
+                href="https://teachmecode.ae/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary-600 hover:text-primary-700 transition-colors"
+              >
                 TeachMeCode® Institute
               </a>
             </div>
           </div>
         </div>
       </footer>
-
-      {/* Debug overlay */}
-      {showDebug && (
-        <DebugPanel
-          currentStep={currentStep}
-          players={players}
-          drawData={drawData}
-          matcher={matcher}
-          regenerateAll={handleDrawUpdate}
-          regenerateRound={(n) => matcher?.regenerateRound?.(n)}
-        />
-      )}
     </div>
   );
 }
