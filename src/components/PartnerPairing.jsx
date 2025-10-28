@@ -1,20 +1,27 @@
 // src/components/PartnerPairing.jsx
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle, XCircle, Users, ChevronRight, ShieldCheck } from 'lucide-react';
+import {
+  CheckCircle,
+  XCircle,
+  Users,
+  ChevronRight,
+  ShieldCheck,
+  Shuffle as ShuffleIcon,
+  RotateCcw as ClearIcon,
+} from 'lucide-react';
 
 /**
  * Props:
  * - players: Array<{ id, name, gender, skillBracket, skillRating, lockedPartner? }>
- * - preConfirmedPairs: Array<[Player, Player]> or Array<{a: Player, b: Player}> (either shape supported)
+ * - preConfirmedPairs: Array<[Player, Player]> or Array<{a: Player, b: Player}>
  * - onPairingComplete: (updatedPlayers) => void
  */
 export default function PartnerPairing({ players = [], preConfirmedPairs = [], onPairingComplete }) {
-  // Internal model for a suggestion card
-  // { a: Player, b: Player, status: 'pending' | 'confirmed' | 'rejected' }
+  // Suggestion card model: { a: Player, b: Player, status: 'pending' | 'confirmed' | 'rejected' }
   const [suggestions, setSuggestions] = useState([]);
   const [unpaired, setUnpaired] = useState([]);
 
-  // ---- Normalize any incoming preConfirmedPairs shape
+  // ---- Normalize incoming preConfirmedPairs to shape {a, b}
   const normalizedPreconfirmed = useMemo(() => {
     return preConfirmedPairs
       .map((p) => {
@@ -25,19 +32,53 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
       .filter(Boolean);
   }, [preConfirmedPairs]);
 
-  // ---- Build the initial suggestion list once, based on current players + preconfirmed
+  // ---- Utilities
+  const shuffleArray = (arr) => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+
+  const makeAutoSuggestions = (pool) => {
+    // Strategy: shuffle, then pair neighbors (2s)
+    const shuffled = shuffleArray(
+      [...pool].sort((p1, p2) => {
+        // light grouping by gender then skill to keep "reasonable" neighbors
+        const g = (p1.gender || '').localeCompare(p2.gender || '');
+        if (g !== 0) return g;
+        return (p1.skillRating ?? 0) - (p2.skillRating ?? 0);
+      }),
+    );
+    const auto = [];
+    for (let i = 0; i < shuffled.length; i += 2) {
+      const a = shuffled[i];
+      const b = shuffled[i + 1];
+      if (a && b) auto.push({ a, b, status: 'pending' });
+    }
+    return auto;
+  };
+
+  const playersById = useMemo(() => {
+    const map = new Map();
+    players.forEach((p) => map.set(p.id, p));
+    return map;
+  }, [players]);
+
+  // Build initial suggestions on mount/when players or preconfirmed change
   useEffect(() => {
-    // Clone players to avoid mutating props
+    // Clone to avoid mutating props
     const pool = players.map((p) => ({ ...p }));
     const taken = new Set();
 
-    // Helper to mark a pair as taken
     const markTaken = (id1, id2) => {
       taken.add(id1);
       taken.add(id2);
     };
 
-    // 1) Respect existing locked partners (already confirmed)
+    // 1) Respect existing locked partners (treat as confirmed)
     const existingLockedPairs = [];
     const seenLocked = new Set();
     for (const p of pool) {
@@ -52,45 +93,36 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
       }
     }
 
-    // 2) Pre-confirmed incoming pairs (treat like confirmed)
+    // 2) Pre-confirmed incoming pairs (treat as confirmed)
     const preConfirmed = [];
     for (const pair of normalizedPreconfirmed) {
-      const a = pool.find((x) => x.id === (pair.a.id ?? pair.a));
-      const b = pool.find((x) => x.id === (pair.b.id ?? pair.b));
+      const aId = pair.a?.id ?? pair.a;
+      const bId = pair.b?.id ?? pair.b;
+      const a = pool.find((x) => x.id === aId);
+      const b = pool.find((x) => x.id === bId);
       if (a && b && !taken.has(a.id) && !taken.has(b.id)) {
         preConfirmed.push({ a, b, status: 'confirmed' });
         markTaken(a.id, b.id);
       }
     }
 
-    // 3) Auto-suggest pairs for the remaining players
-    // Strategy: sort by skillRating (and gender to keep mixed options near each other), then pair neighbors.
+    // 3) Auto-suggest for remaining
     const remaining = pool.filter((p) => !taken.has(p.id));
-    remaining.sort((p1, p2) => {
-      // keep genders grouped but not strictly segregated: M < F for stable order
-      const g = (p1.gender || '').localeCompare(p2.gender || '');
-      if (g !== 0) return g;
-      return (p1.skillRating ?? 0) - (p2.skillRating ?? 0);
-    });
+    const auto = makeAutoSuggestions(remaining);
 
-    const auto = [];
-    for (let i = 0; i < remaining.length; i += 2) {
-      const a = remaining[i];
-      const b = remaining[i + 1];
-      if (a && b) {
-        auto.push({ a, b, status: 'pending' });
-        markTaken(a.id, b.id);
-      }
+    // 4) Unpaired leftovers (odd count)
+    const leftoverIds = new Set();
+    for (const s of auto) {
+      leftoverIds.add(s.a.id);
+      leftoverIds.add(s.b.id);
     }
-
-    // 4) Anyone leftover is unpaired (odd count)
-    const leftover = pool.filter((p) => !taken.has(p.id));
+    const leftover = remaining.filter((p) => !leftoverIds.has(p.id));
 
     setSuggestions([...existingLockedPairs, ...preConfirmed, ...auto]);
     setUnpaired(leftover);
   }, [players, normalizedPreconfirmed]);
 
-  // ---- Actions on a single card
+  // ---- Per-card actions
   const confirmPair = (idx) => {
     setSuggestions((prev) => {
       const next = [...prev];
@@ -107,20 +139,56 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
     });
   };
 
-  // ---- Confirm ALL pending suggestions at once
+  // ---- Bulk actions
   const confirmAll = () => {
     setSuggestions((prev) => prev.map((s) => (s.status === 'pending' ? { ...s, status: 'confirmed' } : s)));
   };
 
-  // ---- Build updated players and finish
+  const handleShuffle = () => {
+    // Keep currently confirmed pairs; reshuffle only the rest
+    const confirmed = suggestions.filter((s) => s.status === 'confirmed' && s.a && s.b);
+    const confirmedIds = new Set();
+    confirmed.forEach((s) => {
+      confirmedIds.add(s.a.id);
+      confirmedIds.add(s.b.id);
+    });
+
+    const remaining = players.filter((p) => !confirmedIds.has(p.id));
+    const auto = makeAutoSuggestions(remaining);
+
+    // Recompute unpaired for new autos
+    const pairedIds = new Set();
+    auto.forEach((s) => {
+      pairedIds.add(s.a.id);
+      pairedIds.add(s.b.id);
+    });
+    const leftover = remaining.filter((p) => !pairedIds.has(p.id));
+
+    setSuggestions([...confirmed, ...auto]);
+    setUnpaired(leftover);
+  };
+
+  const handleClearAll = () => {
+    // Drop all confirmations/rejections and rebuild fresh pending suggestions over ALL players
+    const auto = makeAutoSuggestions(players);
+    const pairedIds = new Set();
+    auto.forEach((s) => {
+      pairedIds.add(s.a.id);
+      pairedIds.add(s.b.id);
+    });
+    const leftover = players.filter((p) => !pairedIds.has(p.id));
+    setSuggestions(auto); // only pending suggestions
+    setUnpaired(leftover);
+  };
+
+  // ---- Finish
   const handleContinue = () => {
     // Copy incoming players so we can set lockedPartner safely
     const updated = players.map((p) => ({ ...p }));
-
-    // Clear any existing lockedPartner first (fresh pass)
+    // Remove any previous lock first (fresh pass)
     for (const p of updated) delete p.lockedPartner;
 
-    // Apply confirmed suggestions both ways
+    // Apply only confirmed suggestions both ways
     for (const s of suggestions) {
       if (s.status === 'confirmed' && s.a && s.b) {
         const a = updated.find((x) => x.id === s.a.id);
@@ -144,7 +212,7 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
         <div>
           <h2 className="text-2xl font-bold text-neutral-900">Partner Pairing</h2>
           <p className="text-neutral-600">
-            Confirm suggested pairs or reject to adjust later. You can also confirm everything in one click.
+            Confirm suggested pairs or reject to adjust later. You can bulk confirm, shuffle, or clear all.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -166,8 +234,26 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
           Confirm All Suggested Pairs
         </button>
 
+        <button
+          onClick={handleShuffle}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-100 text-neutral-800 rounded-lg hover:bg-neutral-200 transition-colors"
+          title="Shuffle pending suggestions (keeps confirmed pairs)"
+        >
+          <ShuffleIcon className="w-4 h-4" />
+          Shuffle Suggestions
+        </button>
+
+        <button
+          onClick={handleClearAll}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-100 text-neutral-800 rounded-lg hover:bg-neutral-200 transition-colors"
+          title="Clear all confirmations and rebuild fresh pending suggestions"
+        >
+          <ClearIcon className="w-4 h-4" />
+          Clear All
+        </button>
+
         <div className="text-sm text-neutral-600">
-          Tip: You can still confirm/reject individual pairs below after using “Confirm All”.
+          Tip: Shuffle keeps confirmed pairs; Clear All resets everything back to pending autos.
         </div>
       </div>
 
@@ -194,7 +280,9 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
                 <div className="font-semibold text-neutral-900">
                   {s.a?.name} <span className="text-neutral-500 text-sm">({s.a?.skillRating})</span>
                 </div>
-                <div className="text-neutral-600 text-sm">{s.a?.gender} • {s.a?.skillBracket}</div>
+                <div className="text-neutral-600 text-sm">
+                  {s.a?.gender} • {s.a?.skillBracket}
+                </div>
               </div>
 
               <ChevronRight className="w-5 h-5 text-neutral-400" />
@@ -203,7 +291,9 @@ export default function PartnerPairing({ players = [], preConfirmedPairs = [], o
                 <div className="font-semibold text-neutral-900">
                   {s.b?.name} <span className="text-neutral-500 text-sm">({s.b?.skillRating})</span>
                 </div>
-                <div className="text-neutral-600 text-sm">{s.b?.gender} • {s.b?.skillBracket}</div>
+                <div className="text-neutral-600 text-sm">
+                  {s.b?.gender} • {s.b?.skillBracket}
+                </div>
               </div>
             </div>
 
