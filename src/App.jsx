@@ -4,13 +4,14 @@ import PartnerPairing from './components/PartnerPairing';
 import DrawDisplay from './components/DrawDisplay';
 import { TournamentMatcher } from './utils/matchingAlgorithm';
 import { Trophy, Users, Target } from 'lucide-react';
+import demoPlayers from './data/demoPlayers';
 
 function App() {
   const [currentStep, setCurrentStep] = useState('input'); // 'input', 'pairing', 'draw'
   const [players, setPlayers] = useState([]);
   const [preConfirmedPairs, setPreConfirmedPairs] = useState([]);
   const [drawData, setDrawData] = useState(null);
-  const [matcher, setMatcher] = useState(null); // Added matcher state
+  const [matcher, setMatcher] = useState(null);
 
   const handleDataSubmit = (playerData, confirmedPairs = []) => {
     setPlayers(playerData);
@@ -24,18 +25,15 @@ function App() {
   };
 
   const generateDraw = (playerList = players) => {
-    const newMatcher = new TournamentMatcher(playerList, 8, 11);
+    const newMatcher = new TournamentMatcher(playerList, 8, 11); // courts=8, toScore=11 (adjust later)
     const draw = newMatcher.generateDraw();
     const summary = newMatcher.getDrawSummary();
-
     setMatcher(newMatcher);
     setDrawData(summary);
     setCurrentStep('draw');
   };
 
-  const handleDrawUpdate = () => {
-    generateDraw();
-  };
+  const handleDrawUpdate = () => generateDraw();
 
   const resetToStart = () => {
     setCurrentStep('input');
@@ -45,26 +43,22 @@ function App() {
     setMatcher(null);
   };
 
-  const handleStepNavigation = (step) => {
-    setCurrentStep(step);
-  };
+  const handleStepNavigation = (step) => setCurrentStep(step);
 
-  const getStepIcon = (step) => {
-    const icons = {
-      input: Users,
-      pairing: Target,
-      draw: Trophy
-    };
-    return icons[step];
-  };
+  const getStepIcon = (step) => ({ input: Users, pairing: Target, draw: Trophy }[step]);
+  const getStepTitle = (step) => ({ input: 'Player Data', pairing: 'Partner Pairing', draw: 'Tournament Draw' }[step]);
 
-  const getStepTitle = (step) => {
-    const titles = {
-      input: 'Player Data',
-      pairing: 'Partner Pairing',
-      draw: 'Tournament Draw'
-    };
-    return titles[step];
+  // New: one-click demo loader
+  const loadDemo = () => {
+    setPlayers(demoPlayers);
+    setPreConfirmedPairs([]);
+    setCurrentStep('pairing');
+    // Go straight to draw for convenience:
+    const newMatcher = new TournamentMatcher(demoPlayers, 4, 11); // fewer courts for demo
+    const summary = newMatcher.getDrawSummary();
+    setMatcher(newMatcher);
+    setDrawData(summary);
+    setCurrentStep('draw');
   };
 
   return (
@@ -80,15 +74,23 @@ function App() {
                 <p className="text-sm text-neutral-600">Professional tournament management system</p>
               </div>
             </div>
-            
-            {currentStep !== 'input' && (
+
+            <div className="flex items-center gap-2">
+              {currentStep !== 'input' && (
+                <button
+                  onClick={resetToStart}
+                  className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+                >
+                  Start Over
+                </button>
+              )}
               <button
-                onClick={resetToStart}
-                className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+                onClick={loadDemo}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
               >
-                Start Over
+                Load Demo
               </button>
-            )}
+            </div>
           </div>
         </div>
       </header>
@@ -101,32 +103,36 @@ function App() {
               const Icon = getStepIcon(step);
               const isActive = currentStep === step;
               const isCompleted = ['input', 'pairing', 'draw'].indexOf(currentStep) > index;
-              const canNavigate = step === 'input' || 
-                (step === 'pairing' && players.length > 0) || 
+              const canNavigate =
+                step === 'input' ||
+                (step === 'pairing' && players.length > 0) ||
                 (step === 'draw' && drawData);
-              
+
               return (
                 <div key={step} className="flex items-center">
-                  <button 
-                    onClick={() => canNavigate ? handleStepNavigation(step) : null}
+                  <button
+                    onClick={() => (canNavigate ? handleStepNavigation(step) : null)}
                     disabled={!canNavigate}
                     className={`flex items-center gap-3 transition-colors ${
-                    isActive ? 'text-primary-600' : 
-                    isCompleted ? 'text-success-600' : 'text-neutral-400'
-                  } ${canNavigate ? 'hover:text-primary-700 cursor-pointer' : 'cursor-not-allowed'}`}>
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                      isActive ? 'bg-primary-100' : 
-                      isCompleted ? 'bg-success-100' : 'bg-neutral-100'
-                    }`}>
+                      isActive
+                        ? 'text-primary-600'
+                        : isCompleted
+                        ? 'text-success-600'
+                        : 'text-neutral-400'
+                    } ${canNavigate ? 'hover:text-primary-700 cursor-pointer' : 'cursor-not-allowed'}`}
+                  >
+                    <div
+                      className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                        isActive ? 'bg-primary-100' : isCompleted ? 'bg-success-100' : 'bg-neutral-100'
+                      }`}
+                    >
                       <Icon className="w-5 h-5" />
                     </div>
                     <span className="font-medium">{getStepTitle(step)}</span>
                   </button>
-                  
+
                   {index < 2 && (
-                    <div className={`w-16 h-0.5 mx-4 ${
-                      isCompleted ? 'bg-success-300' : 'bg-neutral-200'
-                    }`} />
+                    <div className={`w-16 h-0.5 mx-4 ${isCompleted ? 'bg-success-300' : 'bg-neutral-200'}`} />
                   )}
                 </div>
               );
@@ -138,24 +144,16 @@ function App() {
       {/* Main Content */}
       <main className="py-8">
         {currentStep === 'input' && (
-          <DataInput 
-            onDataSubmit={handleDataSubmit} 
-            initialPlayers={players}
-            initialPreConfirmedPairs={preConfirmedPairs}
-          />
+          <DataInput onDataSubmit={handleDataSubmit} initialPlayers={players} initialPreConfirmedPairs={preConfirmedPairs} />
         )}
-        
+
         {currentStep === 'pairing' && (
-          <PartnerPairing 
-            players={players} 
-            preConfirmedPairs={preConfirmedPairs}
-            onPairingComplete={handlePairingComplete} 
-          />
+          <PartnerPairing players={players} preConfirmedPairs={preConfirmedPairs} onPairingComplete={handlePairingComplete} />
         )}
-        
+
         {currentStep === 'draw' && drawData && (
-          <DrawDisplay 
-            drawData={drawData} 
+          <DrawDisplay
+            drawData={drawData}
             players={players}
             onDrawUpdate={handleDrawUpdate}
             matcher={matcher}
@@ -172,21 +170,11 @@ function App() {
             <p className="mb-2">Professional Tournament Management System</p>
             <div className="text-sm">
               AI vibe coded development by{' '}
-              <a 
-                href="https://biela.dev/" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-primary-600 hover:text-primary-700 transition-colors"
-              >
+              <a href="https://biela.dev/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700 transition-colors">
                 Biela.dev
               </a>
               , powered by{' '}
-              <a 
-                href="https://teachmecode.ae/" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-primary-600 hover:text-primary-700 transition-colors"
-              >
+              <a href="https://teachmecode.ae/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700 transition-colors">
                 TeachMeCode® Institute
               </a>
             </div>
