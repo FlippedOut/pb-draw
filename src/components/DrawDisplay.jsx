@@ -135,7 +135,8 @@ function DrawDisplay({ drawData, players, onDrawUpdate, matcher, onPlayersUpdate
             Edit Players
           </button>
 
-          {currentDraw.canUndo && (
+          {/* Undo hidden until engine implements it */}
+          {/* {currentDraw.canUndo && (
             <button
               onClick={undoLastRegeneration}
               className="flex items-center gap-2 px-4 py-2 bg-warning-100 text-warning-700 rounded-lg hover:bg-warning-200 transition-colors"
@@ -143,7 +144,7 @@ function DrawDisplay({ drawData, players, onDrawUpdate, matcher, onPlayersUpdate
               <Undo2 className="w-4 h-4" />
               Undo Last Regeneration
             </button>
-          )}
+          )} */}
 
           <button
             onClick={() => setEditMode(!editMode)}
@@ -241,13 +242,14 @@ function DrawDisplay({ drawData, players, onDrawUpdate, matcher, onPlayersUpdate
                   Round {round.round}
                 </h3>
                 <div className="flex items-center gap-4">
-                  <button
+                  {/* Regenerate Round hidden until engine implements it */}
+                  {/* <button
                     onClick={() => regenerateRound(round.round)}
                     className="flex items-center gap-1 px-3 py-1 bg-primary-100 text-primary-700 rounded hover:bg-primary-200 transition-colors text-sm"
                   >
                     <RefreshCw className="w-3 h-3" />
                     Regenerate Round
-                  </button>
+                  </button> */}
                   <div className="text-sm text-neutral-600">
                     {round.matches.length} matches | {round.byes.length} byes
                   </div>

@@ -249,11 +249,50 @@ function DataInput({ onDataSubmit, initialPlayers = [], initialPreConfirmedPairs
   };
   const matchesName = (fullName, searchName) => {
     if (!searchName) return false;
-    const full = fullName.toLowerCase().trim();
-    const search = searchName.toLowerCase().trim();
-    const firstName = full.split(' ')[0];
-    const lastName = full.split(' ').slice(-1)[0];
-    return full.includes(search) || search.includes(firstName) || search.includes(lastName);
+    const nicknames = {
+      gregory: ['greg'],
+      michael: ['mike'],
+      elizabeth: ['liz', 'beth', 'lizzy'],
+      katherine: ['kate', 'kat', 'kathy'],
+      william: ['will', 'bill', 'billy'],
+      robert: ['rob', 'bob', 'bobby'],
+      alexander: ['alex'],
+      alexandra: ['alex'],
+    };
+
+    const norm = (s) => (s || '').toLowerCase().trim();
+    const full = norm(fullName);
+    const search = norm(searchName);
+
+    const [fullFirst, ...rest] = full.split(' ').filter(Boolean);
+    const fullLast = rest.length > 0 ? rest[rest.length - 1] : '';
+
+    const searchParts = search.split(' ').filter(Boolean);
+    const searchFirst = searchParts[0] || '';
+    const searchLast = searchParts.length > 1 ? searchParts[searchParts.length - 1] : '';
+
+    // Require last-name match if the search includes a last name
+    if (searchLast && fullLast && searchLast !== fullLast) return false;
+
+    // Exact match or substring match
+    if (full.includes(search) || search.includes(full)) return true;
+
+    // Nickname tolerant first-name match when last name matches
+    const canon = (name) => {
+      const list = nicknames[name] || [];
+      return new Set([name, ...list]);
+    };
+
+    const firstSet = canon(fullFirst);
+    if (searchLast && fullLast === searchLast) {
+      if (firstSet.has(searchFirst)) return true;
+      // also allow if searchFirst is a nickname of fullFirst
+      for (const [formal, alts] of Object.entries(nicknames)) {
+        if (formal === fullFirst && alts.includes(searchFirst)) return true;
+      }
+    }
+
+    return false;
   };
 
   const confirmPair = (pairId) => {

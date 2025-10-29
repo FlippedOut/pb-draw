@@ -11,6 +11,7 @@ function App() {
   const [preConfirmedPairs, setPreConfirmedPairs] = useState([]);
   const [drawData, setDrawData] = useState(null);
   const [matcher, setMatcher] = useState(null); // Added matcher state
+  const [startingCourt, setStartingCourt] = useState(1);
 
   const handleDataSubmit = (playerData, confirmedPairs = []) => {
     setPlayers(playerData);
@@ -24,7 +25,7 @@ function App() {
   };
 
   const generateDraw = (playerList = players) => {
-    const newMatcher = new TournamentMatcher(playerList, 8, 11);
+    const newMatcher = new TournamentMatcher(playerList, 8, 11, { startingCourt });
     const draw = newMatcher.generateDraw();
     const summary = newMatcher.getDrawSummary();
 
@@ -81,14 +82,27 @@ function App() {
               </div>
             </div>
             
-            {currentStep !== 'input' && (
-              <button
-                onClick={resetToStart}
-                className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
-              >
-                Start Over
-              </button>
-            )}
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <label htmlFor="startingCourt" className="text-sm text-neutral-700">Starting court</label>
+                <input
+                  id="startingCourt"
+                  type="number"
+                  min={1}
+                  value={startingCourt}
+                  onChange={(e) => setStartingCourt(Math.max(1, parseInt(e.target.value || '1', 10)))}
+                  className="w-24 px-2 py-1 border border-neutral-300 rounded"
+                />
+              </div>
+              {currentStep !== 'input' && (
+                <button
+                  onClick={resetToStart}
+                  className="px-4 py-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+                >
+                  Start Over
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </header>

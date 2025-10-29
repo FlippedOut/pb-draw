@@ -1,9 +1,10 @@
 // Tournament matching algorithm for pickleball draws
 export class TournamentMatcher {
-  constructor(players, rounds = 8, courts = 11) {
+  constructor(players, rounds = 8, courts = 11, options = {}) {
     this.players = players;
     this.rounds = rounds;
     this.courts = courts;
+    this.startingCourt = options.startingCourt ?? 1;
     this.maxPlayersPerRound = courts * 4;
     this.draws = [];
     this.playerStats = new Map();
@@ -20,7 +21,8 @@ export class TournamentMatcher {
         opponents: new Set(),
         partners: new Set(),
         byeRounds: 0,
-        byeCount: player.byeCount || 0 // Track total byes for fair rotation
+        byeCount: player.byeCount || 0, // Track total byes for fair rotation
+        neverWith: new Set(player.neverWith || [])
       });
     });
   }
@@ -60,10 +62,18 @@ export class TournamentMatcher {
 
     // Then handle remaining singles
     const remainingPlayers = availablePlayers.filter(p => !usedPlayers.has(p.id));
-    const singleMatches = this.createSingleMatches(remainingPlayers, usedPlayers, roundNumber, 1); // Default startingCourtNumber to 1 for singles
+    const singleMatches = this.createSingleMatches(remainingPlayers, usedPlayers, roundNumber, 1); // temporary numbering; will renumber below
     matches.push(...singleMatches);
 
-    return matches.slice(0, this.courts);
+    // Limit matches to available courts and renumber courts starting from configured startingCourt
+    const limited = matches.slice(0, this.courts);
+    const now = Date.now();
+    for (let i = 0; i < limited.length; i++) {
+      const courtNum = this.startingCourt + i;
+      limited[i].court = courtNum;
+      limited[i].id = `match-${courtNum}-${now}`;
+    }
+    return limited;
   }
 
   getLockedPairs(players) {
@@ -87,7 +97,7 @@ export class TournamentMatcher {
   createLockedPairMatches(lockedPairs, usedPlayers, roundNumber) {
     const matches = [];
     const availablePairs = [...lockedPairs];
-    let courtNumber = 1; // Default startingCourtNumber to 1 for locked pairs
+    let courtNumber = 1; // temporary numbering; renumbered later
 
     while (availablePairs.length >= 2 && matches.length < this.courts) {
       const pair1 = availablePairs.shift();
@@ -110,8 +120,12 @@ export class TournamentMatcher {
   findBestOpponentPair(targetPair, availablePairs, roundNumber) {
     if (availablePairs.length === 0) return null;
 
+    const targetType = this.getGenderMatchType(targetPair);
+    const sameTypeCandidates = availablePairs.filter(p => this.getGenderMatchType(p) === targetType);
+    const candidates = sameTypeCandidates.length > 0 ? sameTypeCandidates : availablePairs;
+
     // Score each potential opponent pair
-    const scoredPairs = availablePairs.map(pair => ({
+    const scoredPairs = candidates.map(pair => ({
       pair,
       score: this.calculatePairMatchScore(targetPair, pair, roundNumber)
     }));
@@ -119,7 +133,7 @@ export class TournamentMatcher {
     // Sort by best score (highest is best match)
     scoredPairs.sort((a, b) => b.score - a.score);
     
-    return scoredPairs[0].pair;
+    return scoredPairs[0]?.pair || null;
   }
 
   calculatePairMatchScore(pair1, pair2, roundNumber) {
@@ -135,13 +149,20 @@ export class TournamentMatcher {
     const genderMatch1 = this.getGenderMatchType(pair1);
     const genderMatch2 = this.getGenderMatchType(pair2);
     if (genderMatch1 === genderMatch2) {
-      score += 15;
+      score += 30; // stronger preference for like-vs-like
+    }
+    // Strongly discourage male-pair vs female-pair unless absolutely necessary
+    if ((genderMatch1 === 'male-pair' && genderMatch2 === 'female-pair') ||
+        (genderMatch1 === 'female-pair' && genderMatch2 === 'male-pair')) {
+      score -= 1000;
     }
 
     // Avoid repeat opponents
     const hasPlayedBefore = this.havePairsPlayedBefore(pair1, pair2);
     if (!hasPlayedBefore) {
-      score += 20;
+      score += 40; // much stronger push to avoid repeats
+    } else {
+      score -= 50;
     }
 
     return score;
@@ -225,13 +246,19 @@ export class TournamentMatcher {
     pairCombination.forEach(pair => {
       const [p1, p2] = pair;
       
+      // Hard avoid never-pairs
+      const p1Never = new Set(this.playerStats.get(p1.id)?.neverWith || []);
+      if (p1Never.has(p2.id)) {
+        score -= 1000;
+      }
+
       // Skill balance within pair
       const skillDiff = Math.abs(p1.skillRating - p2.skillRating);
       score += Math.max(0, 5 - skillDiff);
       
       // Gender preferences
       if (p1.gender === p2.gender) {
-        score += 3;
+        score += 5;
       }
       
       // Avoid repeat partnerships
@@ -240,6 +267,19 @@ export class TournamentMatcher {
         score += 5;
       }
     });
+
+    // Enforce like-vs-like across the two pairs when possible
+    if (pairCombination.length === 2) {
+      const typeOf = (pair) => this.getGenderMatchType(pair);
+      const type1 = typeOf(pairCombination[0]);
+      const type2 = typeOf(pairCombination[1]);
+      if (type1 === type2) {
+        score += 40; // strong preference for same-category match
+      } else {
+        // Discourage cross-category (e.g., mixed vs male-pair or mixed vs female-pair)
+        score -= 200;
+      }
+    }
     
     return score;
   }
@@ -249,7 +289,7 @@ export class TournamentMatcher {
       court: courtNumber,
       team1: pair1,
       team2: pair2,
-      id: `match-${courtNumber}-${Date.now()}`
+      id: `match-${courtNumber}-${Date.now()}` // will be renumbered at round end
     };
     
     // Update player statistics
